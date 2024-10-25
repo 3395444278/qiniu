@@ -1,0 +1,29 @@
+# 环境变量
+.env
+.env.local
+.env.*.local
+
+# 编译输出
+/bin
+/dist
+
+# 依赖目录
+/vendor
+/node_modules
+
+# IDE文件
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 日志文件
+*.log
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 测试覆盖率报告
+coverage.txt
+coverage.html
