@@ -64,11 +64,6 @@ func main() {
 
 				// 打印结果
 				printResult(developer)
-
-				// 保存到数据库
-				if err := developer.Create(); err != nil {
-					log.Printf("Error saving user %s: %v\n", username, err)
-				}
 			}
 		}()
 	}

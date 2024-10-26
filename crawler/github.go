@@ -2,6 +2,7 @@ package crawler
 
 import (
 	"context"
+	"encoding/json" // 添加这一行
 	"fmt"
 	"log"
 	"math"
@@ -56,7 +57,24 @@ func NewGitHubCrawler() *GitHubCrawler {
 
 // GetUserData 获取用基本信息
 func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error) {
-	// 1. 首先检查数据库中是否已存在该用户
+	// 1. 检查缓存
+	if cache.RedisClient != nil {
+		cacheKey := fmt.Sprintf("developer:%s", username)
+		if cached, err := cache.RedisClient.Get(gc.ctx, cacheKey).Result(); err == nil {
+			var cacheData struct {
+				Developer *models.Developer `json:"developer"`
+				UpdatedAt time.Time         `json:"updated_at"`
+			}
+			if err := json.Unmarshal([]byte(cached), &cacheData); err == nil {
+				// 检查缓存是否需要更新
+				if !shouldUpdateCache(cacheData.Developer, cacheData.UpdatedAt) {
+					return cacheData.Developer, nil
+				}
+			}
+		}
+	}
+
+	// 2. 检查数据库
 	existingDev, err := models.FindByUsername(username)
 	if err != nil && err != mongo.ErrNoDocuments {
 		return nil, err
@@ -64,6 +82,20 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 
 	// 如果存在且不需要更新，直接返回
 	if existingDev != nil && !existingDev.ShouldUpdate() {
+		// 更新缓存
+		if cache.RedisClient != nil {
+			cacheData := struct {
+				Developer *models.Developer `json:"developer"`
+				UpdatedAt time.Time         `json:"updated_at"`
+			}{
+				Developer: existingDev,
+				UpdatedAt: time.Now(),
+			}
+			if data, err := json.Marshal(cacheData); err == nil {
+				expiration := calculateCacheExpiration(existingDev)
+				cache.RedisClient.Set(gc.ctx, fmt.Sprintf("developer:%s", username), data, expiration)
+			}
+		}
 		return existingDev, nil
 	}
 
@@ -78,10 +110,6 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 
 	// 加超时控制
 	ctx, cancel := context.WithTimeout(gc.ctx, 30*time.Second)
-	defer cancel()
-
-	// 设置超时上下文
-	ctx, cancel = context.WithTimeout(gc.ctx, 30*time.Second)
 	defer cancel()
 
 	// 并发获取用户信息和仓库信息
@@ -129,7 +157,6 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 	}
 
 	// 删除这里的重复获取
-	// avatarURL = user.GetAvatarURL()  // 删除这行
 	if avatarURL == "" {
 		log.Printf("Warning - No avatar URL found for user: %s", username)
 	} else {
@@ -141,26 +168,19 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 	skillMap := make(map[string]struct{})
 
 	for _, repo := range repos {
-		// 获取主语言
-		if repo.Language != nil && *repo.Language != "" {
-			skillMap[*repo.Language] = struct{}{}
-		}
-
-		// 获取所有使用的语言
-		languages, _, err := gc.client.Repositories.ListLanguages(gc.ctx, username, getPtrValue(repo.Name))
-		if err != nil {
-			continue
-		}
-
-		for lang := range languages {
+		for lang := range gc.getLanguageInfo(repo, getPtrValue(repo.Owner.Login)) {
 			skillMap[lang] = struct{}{}
 		}
 	}
 
 	// 转换为切片
+	skills = make([]string, 0, len(skillMap))
 	for skill := range skillMap {
-		skills = append(skills, skill)
+		if skill != "" {
+			skills = append(skills, skill)
+		}
 	}
+
 	sort.Strings(skills)
 
 	// 计算总 star 数和 fork 数
@@ -220,12 +240,11 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 		// 更新现有开发者
 		developer.ID = existingDev.ID
 		developer.CreatedAt = existingDev.CreatedAt
-
 		if err := developer.Update(); err != nil {
 			return nil, fmt.Errorf("更新用户失败: %v", err)
 		}
 	} else {
-		// 创建新开发者，不要设置 ID
+		// 创建新开发者
 		if err := developer.Create(); err != nil {
 			return nil, fmt.Errorf("创建用户失败: %v", err)
 		}
@@ -332,6 +351,27 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 	// 在保存到数据库之前再次确认
 	if developer.Avatar == "" {
 		log.Printf("Warning - Developer %s has no avatar URL before saving to database", developer.Username)
+	}
+	if cache.RedisClient != nil {
+		cacheKey := fmt.Sprintf("developer:%s", username)
+		if data, err := json.Marshal(developer); err == nil {
+			cache.RedisClient.Set(gc.ctx, cacheKey, data, 24*time.Hour)
+		}
+	}
+
+	// 在返回前更新缓存
+	if cache.RedisClient != nil {
+		cacheData := struct {
+			Developer *models.Developer `json:"developer"`
+			UpdatedAt time.Time         `json:"updated_at"`
+		}{
+			Developer: developer,
+			UpdatedAt: time.Now(),
+		}
+		if data, err := json.Marshal(cacheData); err == nil {
+			expiration := calculateCacheExpiration(developer)
+			cache.RedisClient.Set(gc.ctx, fmt.Sprintf("developer:%s", username), data, expiration)
+		}
 	}
 
 	return developer, nil
@@ -442,7 +482,7 @@ func (gc *GitHubCrawler) GetUserRepositories(username string) ([]*github.Reposit
 	// 设置选项，获取所有仓库（包括fork的）
 	opts := &github.RepositoryListOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
-		Type:        "all", // 修改为 "all" 而不是 "owner"
+		Type:        "all",
 		Sort:        "updated",
 		Direction:   "desc",
 	}
@@ -455,34 +495,36 @@ func (gc *GitHubCrawler) GetUserRepositories(username string) ([]*github.Reposit
 		}
 		allRepos = append(allRepos, repos...)
 
-		// 打印每个仓库的详细信息用于调试
-		for _, repo := range repos {
-			log.Printf("Debug - Repository: %s, Stars: %d, Forks: %d, Size: %d, Fork: %v",
-				repo.GetName(),
-				repo.GetStargazersCount(),
-				repo.GetForksCount(),
-				repo.GetSize(),
-				repo.GetFork())
-		}
-
 		if resp.NextPage == 0 {
 			break
 		}
 		opts.Page = resp.NextPage
 	}
 
-	// 获每个仓库的详细信息
+	// 使用工作池并发获取详细信息
+	results := make([]*github.Repository, len(allRepos))
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, 5) // 限制并发数
+
 	for i, repo := range allRepos {
-		// 获取完整的仓库信息
-		fullRepo, _, err := gc.client.Repositories.Get(ctx, username, repo.GetName())
-		if err != nil {
-			log.Printf("Warning: Failed to get full repository info for %s: %v", repo.GetName(), err)
-			continue
-		}
-		allRepos[i] = fullRepo
+		wg.Add(1)
+		go func(i int, repo *github.Repository) {
+			defer wg.Done()
+			semaphore <- struct{}{}        // 获取信号
+			defer func() { <-semaphore }() // 释放信号量
+
+			fullRepo, _, err := gc.client.Repositories.Get(ctx, username, repo.GetName())
+			if err != nil {
+				log.Printf("Warning: Failed to get full repository info for %s: %v", repo.GetName(), err)
+				results[i] = repo // 如果获取失败，使用原始数据
+				return
+			}
+			results[i] = fullRepo
+		}(i, repo)
 	}
 
-	return allRepos, nil
+	wg.Wait()
+	return results, nil
 }
 
 // calculateTalentRank 计算开发者的 TalentRank
@@ -512,43 +554,7 @@ func getPtrValue[T any](ptr *T) T {
 	return *ptr
 }
 
-// extractSkills 提取技能
-func (gc *GitHubCrawler) extractSkills(repos []*github.Repository) []string {
-	skillMap := make(map[string]struct{})
-
-	// 遍历所有仓库
-	for _, repo := range repos {
-		// 获取仓库的语言信息
-		if repo.Language != nil && *repo.Language != "" {
-			skillMap[*repo.Language] = struct{}{}
-		}
-
-		// 获取仓库的所有语言
-		ctx := context.Background()
-		languages, _, err := gc.client.Repositories.ListLanguages(ctx, getPtrValue(repo.Owner.Login), getPtrValue(repo.Name))
-		if err != nil {
-			continue
-		}
-
-		// 添加所有使用的语
-		for lang := range languages {
-			skillMap[lang] = struct{}{}
-		}
-	}
-
-	// 转换为切
-	skills := make([]string, 0, len(skillMap))
-	for skill := range skillMap {
-		if skill != "" {
-			skills = append(skills, skill)
-		}
-	}
-
-	// 按字母顺序排序
-	sort.Strings(skills)
-	return skills
-}
-
+// repoNames 提取技能
 func repoNames(repos []*github.Repository) []string {
 	// 使用 map 去重
 	nameMap := make(map[string]struct{})
@@ -735,7 +741,7 @@ func extractLocationFromBio(bio string) string {
 
 // getRepoReadme 获取仓库的README内容
 func (gc *GitHubCrawler) getRepoReadme(repo *github.Repository) string {
-	// 获取仓库的所有者和名称
+	// 获仓库的所有者和名称
 	owner := getPtrValue(repo.Owner.Login)
 	repoName := getPtrValue(repo.Name)
 
@@ -866,7 +872,7 @@ func QuickPredictNation(username string, user *github.User, repos []*github.Repo
 	}
 }
 
-// containsChinese 检测字符串是否包含中文字符
+// containsChinese 检测字符是否包含中文字符
 func containsChinese(s string) bool {
 	for _, r := range s {
 		if unicode.Is(unicode.Han, r) {
@@ -914,7 +920,7 @@ func analyzeBasicInfo(username string, repos []*github.Repository) string {
 		return "KR"
 	}
 
-	// 2. 快速检查仓库和描述
+	// 2. 快速检查仓库和描
 	for _, repo := range repos {
 		desc := strings.ToLower(getPtrValue(repo.Description))
 		switch {
@@ -952,7 +958,7 @@ func calculateProjectImportance(repos []*github.Repository) float64 {
 		// 计算单个仓库的得分
 		repoScore := float64(0)
 
-		// 1. Star 权重计算（使用对数计算，避免单个高 star 项目过度影响）
+		// 1. Star 权重计算（使用对数计算，避免单个 star 项目过度影响）
 		if stars > 0 {
 			repoScore += math.Log10(float64(stars)) * 2
 		}
@@ -987,7 +993,7 @@ func calculateProjectImportance(repos []*github.Repository) float64 {
 	return normalizedScore
 }
 
-// 计算开发者的贡献度，基 commit 数或其他贡献指标
+// 计算开发者的贡献度，基 commit 数或他贡献指标
 func (gc *GitHubCrawler) calculateContributionLevel(username string, repos []*github.Repository) float64 {
 	var totalScore float64
 	var validRepos int
@@ -1010,7 +1016,7 @@ func (gc *GitHubCrawler) calculateContributionLevel(username string, repos []*gi
 		// 2. 计算提交得分（使用对数计算）
 		commitScore := math.Log10(float64(userCommits)) * 2
 
-		// 3. 如果是仓库所有者，获得额外加分
+		// 3. 果是仓库所有者，获得额外加分
 		if owner == username {
 			commitScore *= 1.5
 		}
@@ -1112,4 +1118,90 @@ func calculateConfidence(contributions, stars, followers int, hasLocation bool) 
 
 	// 确保置信度在 0-100 之间
 	return math.Min(totalConfidence*100, 100)
+}
+
+// 添加新的方法，合并语言信息获取逻辑
+func (gc *GitHubCrawler) getLanguageInfo(repo *github.Repository, username string) map[string]struct{} {
+	skillMap := make(map[string]struct{})
+
+	// 获取主语言
+	if repo.Language != nil && *repo.Language != "" {
+		skillMap[*repo.Language] = struct{}{}
+	}
+
+	// 获取所有使用的语言
+	languages, _, err := gc.client.Repositories.ListLanguages(gc.ctx, username, repo.GetName())
+	if err != nil {
+		return skillMap
+	}
+
+	for lang := range languages {
+		skillMap[lang] = struct{}{}
+	}
+
+	return skillMap
+}
+
+// 添加缓存键生成函数
+func generateCacheKey(username string) string {
+	return fmt.Sprintf("developer:%s", username)
+}
+
+// 添加缓存时间计算函数
+func calculateCacheExpiration(developer *models.Developer) time.Duration {
+	// 根据用户活跃度动态调整缓存时间
+	if developer.CommitCount > 1000 {
+		// 活跃用户：缓存 6 小时
+		return 6 * time.Hour
+	} else if developer.CommitCount > 500 {
+		// 较活跃用户：缓存 12 小时
+		return 12 * time.Hour
+	} else {
+		// 不活跃用户：缓存 24 小时
+		return 24 * time.Hour
+	}
+}
+
+// 添加数据更新检查函数
+func shouldUpdateData(developer *models.Developer, cachedTime time.Time) bool {
+	// 1. 检查是否超过最大缓存时间
+	maxCacheTime := calculateCacheExpiration(developer)
+	if time.Since(cachedTime) > maxCacheTime {
+		return true
+	}
+
+	// 2. 检查用户最近是否有活动
+	if time.Since(developer.LastUpdated) < 6*time.Hour {
+		// 如果用户最近 6 小时内有活动，需要更新数据
+		return true
+	}
+
+	// 3. 检查是否是活跃用户
+	if developer.CommitCount > 1000 && time.Since(cachedTime) > 6*time.Hour {
+		// 活跃用户且缓存超过 6 小时需要更新
+		return true
+	}
+
+	return false
+}
+
+// 检查是否需要更新缓存
+func shouldUpdateCache(developer *models.Developer, cachedTime time.Time) bool {
+	// 1. 检查是否超过最大缓存时间
+	maxCacheTime := calculateCacheExpiration(developer)
+	if time.Since(cachedTime) > maxCacheTime {
+		return true
+	}
+
+	// 2. 检查用户最近是否有活动
+	if time.Since(developer.LastUpdated) < 6*time.Hour {
+		return true
+	}
+
+	// 3. 检查是否是活跃用户
+	if developer.CommitCount > 1000 && time.Since(cachedTime) > 6*time.Hour {
+		return true
+	}
+
+	return false
 }

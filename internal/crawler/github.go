@@ -80,10 +80,6 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 	ctx, cancel := context.WithTimeout(gc.ctx, 30*time.Second)
 	defer cancel()
 
-	// 设置超时上下文
-	ctx, cancel = context.WithTimeout(gc.ctx, 30*time.Second)
-	defer cancel()
-
 	// 并发获取用户信息和仓库信息
 	var user *github.User
 	var repos []*github.Repository
@@ -112,9 +108,6 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 	if repoErr != nil {
 		return nil, repoErr
 	}
-
-	// 添加调试日志
-	log.Printf("Debug - Raw avatar URL from GitHub API: %s", user.GetAvatarURL())
 
 	// 获取用户头像 URL - 只在这里获取一次
 	avatarURL := user.GetAvatarURL()
@@ -191,11 +184,6 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 	log.Printf("最终统计结果 - 总 Stars: %d, 总 Forks: %d, 总贡献: %d",
 		totalStars, totalForks, contributions)
 
-	// 在创建新记录前，删除该用户的所有旧记录
-	if err := models.DeleteByUsername(username); err != nil {
-		log.Printf("Warning: Failed to delete old records for user %s: %v", username, err)
-	}
-
 	// 创建新的开发者记录
 	developer := &models.Developer{
 		Username:     getPtrValue(user.Login),
@@ -214,22 +202,6 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 
 	// 添加调试日志，确认 developer 对象中的 Avatar 字段
 	log.Printf("Debug - Developer object created with Avatar URL: %s", developer.Avatar)
-
-	// 3. 判断是更新还是创建新开发者
-	if existingDev != nil {
-		// 更新现有开发者
-		developer.ID = existingDev.ID
-		developer.CreatedAt = existingDev.CreatedAt
-
-		if err := developer.Update(); err != nil {
-			return nil, fmt.Errorf("更新用户失败: %v", err)
-		}
-	} else {
-		// 创建新开发者，不要设置 ID
-		if err := developer.Create(); err != nil {
-			return nil, fmt.Errorf("创建用户失败: %v", err)
-		}
-	}
 
 	// 假设有函数计算项目重要性和贡献度
 	projectImportance := calculateProjectImportance(repos)
@@ -433,16 +405,14 @@ func analyzeRepoInfo(repos []*github.Repository) string {
 	return ""
 }
 
-// GetUserRepositories 优化仓库获取
+// 修改 GetUserRepositories 方法，使用并发处理
 func (gc *GitHubCrawler) GetUserRepositories(username string) ([]*github.Repository, error) {
-	// 创建上下文，设置超时
 	ctx, cancel := context.WithTimeout(gc.ctx, 20*time.Second)
 	defer cancel()
 
-	// 设置选项，获取所有仓库（包括fork的）
 	opts := &github.RepositoryListOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
-		Type:        "all", // 修改为 "all" 而不是 "owner"
+		Type:        "all",
 		Sort:        "updated",
 		Direction:   "desc",
 	}
@@ -455,34 +425,36 @@ func (gc *GitHubCrawler) GetUserRepositories(username string) ([]*github.Reposit
 		}
 		allRepos = append(allRepos, repos...)
 
-		// 打印每个仓库的详细信息用于调试
-		for _, repo := range repos {
-			log.Printf("Debug - Repository: %s, Stars: %d, Forks: %d, Size: %d, Fork: %v",
-				repo.GetName(),
-				repo.GetStargazersCount(),
-				repo.GetForksCount(),
-				repo.GetSize(),
-				repo.GetFork())
-		}
-
 		if resp.NextPage == 0 {
 			break
 		}
 		opts.Page = resp.NextPage
 	}
 
-	// 获取每个仓库的详细信息
+	// 使用工作池并发获取详细信息
+	results := make([]*github.Repository, len(allRepos))
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, 5) // 限制并发数
+
 	for i, repo := range allRepos {
-		// 获取完整的仓库信息
-		fullRepo, _, err := gc.client.Repositories.Get(ctx, username, repo.GetName())
-		if err != nil {
-			log.Printf("Warning: Failed to get full repository info for %s: %v", repo.GetName(), err)
-			continue
-		}
-		allRepos[i] = fullRepo
+		wg.Add(1)
+		go func(i int, repo *github.Repository) {
+			defer wg.Done()
+			semaphore <- struct{}{}        // 获取信号量
+			defer func() { <-semaphore }() // 释放信号量
+
+			fullRepo, _, err := gc.client.Repositories.Get(ctx, username, repo.GetName())
+			if err != nil {
+				log.Printf("Warning: Failed to get full repository info for %s: %v", repo.GetName(), err)
+				results[i] = repo // 如果获取失败，使用原始数据
+				return
+			}
+			results[i] = fullRepo
+		}(i, repo)
 	}
 
-	return allRepos, nil
+	wg.Wait()
+	return results, nil
 }
 
 // calculateTalentRank 计算开发者的 TalentRank
