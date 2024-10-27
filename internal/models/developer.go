@@ -2,6 +2,7 @@ package models
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"qinniu/internal/pkg/database"
@@ -181,6 +182,7 @@ func FindByID(id string) (*Developer, error) {
 }
 
 // FindByUsername 通过用户名查找开发者
+
 func FindByUsername(username string) (*Developer, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -188,8 +190,8 @@ func FindByUsername(username string) (*Developer, error) {
 	var developer Developer
 	err := getCollection().FindOne(ctx, bson.M{"username": username}).Decode(&developer)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			return nil, nil // 返回 nil, nil 示未找到
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil // 返回 nil, nil 表示未找到
 		}
 		return nil, err
 	}
@@ -227,17 +229,11 @@ func FindAll(page, pageSize int64) ([]*Developer, error) {
 			"fork_count":        1,
 			"last_updated":      1,
 			"avatar":            1,
-			"data_validation": bson.M{
-				"is_valid":       "$data_validation.is_valid",
-				"confidence":     "$data_validation.confidence",
-				"last_validated": "$data_validation.last_validated",
-				"issues":         bson.M{"$ifNull": []interface{}{"$data_validation.issues", primitive.A{}}},
-			},
-			"update_frequency": 1,
+			"update_frequency":  1,
 		}},
 	}
 
-	// 执行聚合查询
+	// 执��合查询
 	cursor, err := getCollection().Aggregate(ctx, pipeline)
 	if err != nil {
 		return nil, err
@@ -391,13 +387,7 @@ func AggregateSearch(pipeline []bson.M) ([]*Developer, error) {
 			"fork_count":        bson.M{"$toInt": "$fork_count"},
 			"last_updated":      1,
 			"avatar":            1,
-			"data_validation": bson.M{
-				"is_valid":       "$data_validation.is_valid",
-				"confidence":     "$data_validation.confidence",
-				"last_validated": "$data_validation.last_validated",
-				"issues":         bson.M{"$ifNull": []interface{}{"$data_validation.issues", primitive.A{}}},
-			},
-			"update_frequency": 1,
+			"update_frequency":  1,
 		},
 	})
 
@@ -427,4 +417,14 @@ func DeleteByUsername(username string) error {
 
 	_, err := getCollection().DeleteMany(ctx, bson.M{"username": username})
 	return err
+}
+
+// CountDevelopers 统计符合条件的开发者数量
+func CountDevelopers(query bson.M) (int64, error) {
+	collection := getCollection() // 使用已定义的 getCollection 函数
+	count, err := collection.CountDocuments(context.Background(), query)
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
 }

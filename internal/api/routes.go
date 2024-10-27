@@ -13,7 +13,6 @@ func SetupRoutes(r *gin.Engine) {
 
 	api := r.Group("/api")
 	{
-		api.GET("/developers", handlers.GetDevelopers)
 		api.GET("/developers/:id", handlers.GetDeveloper)
 		api.GET("/search", handlers.SearchDevelopers)
 

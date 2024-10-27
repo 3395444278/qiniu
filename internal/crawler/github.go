@@ -8,6 +8,7 @@ import (
 	"os"
 	"qinniu/internal/models"
 	"qinniu/internal/pkg/cache"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -52,6 +53,34 @@ func NewGitHubCrawler() *GitHubCrawler {
 		client: client,
 		ctx:    ctx,
 	}
+}
+
+// CleanUsername 清理和验证 GitHub 用户名
+func CleanUsername(rawUsername string) (string, error) {
+	// 移除特殊字符和额外的描述
+	username := strings.Split(rawUsername, " ")[0] // 取第一部分
+	username = strings.Split(username, "·")[0]     // 移除 · 后面的内容
+	username = strings.TrimSpace(username)         // 移除空格
+
+	// GitHub 用户名规则验证
+	// 只允许字母、数字和单个连字符（不能以连字符开始或结束）
+	validUsername := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]$`)
+
+	if !validUsername.MatchString(username) {
+		return "", fmt.Errorf("invalid GitHub username format: %s", username)
+	}
+
+	// 检查连续的连字符
+	if strings.Contains(username, "--") {
+		return "", fmt.Errorf("invalid GitHub username format (contains consecutive hyphens): %s", username)
+	}
+
+	// 检查长度
+	if len(username) > 39 {
+		return "", fmt.Errorf("username too long (max 39 characters): %s", username)
+	}
+
+	return username, nil
 }
 
 // GetUserData 获取用基本信息

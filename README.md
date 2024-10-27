@@ -106,49 +106,6 @@ GET /health
 }
 ```
 
-### 2. 获取所有开发者
-
-```http
-GET /api/developers
-```
-
-获取所有开发者的信息。
-
-#### 查询参数
-
-| 参数     | 类型 | 必需 | 描述         |
-|----------|------|------|--------------|
-| `page`   | int  | 否   | 页码，默认1    |
-| `per_page`| int | 否   | 每页数量，默认20 |
-
-#### 响应示例
-
-```json
-{
-  "code": 0,
-  "message": "success",
-  "data": [
-    {
-      "username": "torvalds",
-      "name": "Linus Torvalds",
-      "avatar": "https://avatars.githubusercontent.com/u/1024025",
-      "location": "Portland, OR",
-      "nation": "US",
-      "nation_confidence": 95.5,
-      "skills": ["C", "Shell", "Perl"],
-      "metrics": {
-        "star_count": 145200,
-        "fork_count": 42300,
-        "commit_count": 8750
-      },
-      "repositories": ["linux", "subsurface", "uemacs"],
-      "talent_rank": 98.7,
-      "confidence": 99.9,
-      "updated_at": "2024-01-20T10:30:00Z"
-    },
-    // ... 其他开发者信息
-  ]
-}
 ```
 
 ### 3. 获取单个开发者信息
@@ -192,62 +149,7 @@ GET /api/developers/{id}
 }
 ```
 
-### 4. 搜索开发者
 
-```http
-GET /api/search
-```
-
-根据条件搜索开发者。
-
-#### 查询参数
-
-| 参数             | 类型   | 必需 | 描述                       | 示例           |
-|------------------|--------|------|----------------------------|----------------|
-| `q`              | string | 否   | 搜索关键词                  | golang         |
-| `skills`         | string | 否   | 技能过滤（逗号分隔）         | go,python      |
-| `nation`         | string | 否   | 国家/地区代码               | CN             |
-| `min_stars`      | int    | 否   | 最小 star 数                | 1000           |
-| `min_rank`       | float  | 否   | 最小 TalentRank 分数         | 80             |
-| `page`           | int    | 否   | 页码（从1开始）             | 1              |
-| `per_page`       | int    | 否   | 每页数量                    | 20             |
-| `sort`           | string | 否   | 排序字段（如 talent_rank） | talent_rank    |
-| `order`          | string | 否   | 排序方向（asc 或 desc）    | desc           |
-
-#### 响应示例
-
-```json
-{
-  "code": 0,
-  "message": "success",
-  "data": {
-    "total": 100,
-    "page": 1,
-    "per_page": 20,
-    "developers": [
-      {
-        "username": "example",
-        "name": "Example User",
-        "avatar": "https://avatars.githubusercontent.com/u/...",
-        "location": "Beijing, China",
-        "nation": "CN",
-        "nation_confidence": 95.5,
-        "skills": ["Go", "Python", "JavaScript"],
-        "metrics": {
-          "star_count": 1200,
-          "fork_count": 300,
-          "commit_count": 5000
-        },
-        "repositories": ["repo1", "repo2"],
-        "talent_rank": 85.6,
-        "confidence": 92.3,
-        "updated_at": "2024-01-20T10:30:00Z"
-      },
-      // ... 其他开发者
-    ]
-  }
-}
-```
 
 ### 5. 创建开发者
 
@@ -492,79 +394,57 @@ curl -X GET "http://api.example.com/api/developers/torvalds" \
   -H "Authorization: Bearer your_token"
 ```
 
-#### 批量获取开发者信息
-
-```bash
-curl -X POST "http://api.example.com/api/developers/batch" \
-  -H "Authorization: Bearer your_token" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "usernames": ["torvalds", "vbuterin"],
-    "concurrency": 2
-  }'
-```
-
-#### 搜索开发者
-
-```bash
-curl -X GET "http://api.example.com/api/search?q=golang&nation=CN&min_stars=1000" \
-  -H "Authorization: Bearer your_token"
-```
-
-### Python 示例
-
-```python
-import requests
-
-API_BASE = "http://api.example.com/api"
-TOKEN = "your_token"
-
-# 获取开发者信息
-def get_developer(username):
-    response = requests.get(
-        f"{API_BASE}/developers/{username}",
-        headers={"Authorization": f"Bearer {TOKEN}"}
-    )
-    return response.json()
-
-# 批量获取开发者信息
-def get_developers_batch(usernames, concurrency=5):
-    response = requests.post(
-        f"{API_BASE}/developers/batch",
-        headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"},
-        json={"usernames": usernames, "concurrency": concurrency}
-    )
-    return response.json()
-
-# 搜索开发者
-def search_developers(query, skills=None, nation=None, min_stars=None, min_rank=None, page=1, per_page=20):
-    params = {
-        "q": query,
-        "skills": skills,
-        "nation": nation,
-        "min_stars": min_stars,
-        "min_rank": min_rank,
-        "page": page,
-        "per_page": per_page,
-        "sort": "talent_rank",
-        "order": "desc"
-    }
-    response = requests.get(
-        f"{API_BASE}/search",
-        headers={"Authorization": f"Bearer {TOKEN}"},
-        params=params
-    )
-    return response.json()
-
-# 使用示例
-developer = get_developer("torvalds")
-print(developer)
-
-batch_developers = get_developers_batch(["torvalds", "vbuterin"])
-print(batch_developers)
-
-search_results = search_developers(q="golang", nation="CN", min_stars=1000)
-print(search_results)
-```
 
 
+### 搜索开发者
+GET /api/search
+
+支持多种搜索条件组合查询，所有参数都是可选的。
+
+#### 查询参数：
+
+| 参数            | 类型 | 说明                                          | 示例                                   |
+|---------------|------|---------------------------------------------|--------------------------------------|
+| name          | string | 模糊查询名字                                      | `name=zero`              |
+| keyword       | string | 关键词搜索(匹配用户名/姓名/邮箱/位置)                       | `keyword=john`                       |
+| domain        | string | 按领域搜索(backend/frontend/mobile/ai等)          | `domain=backend`                     |
+| nations       | array | 按国家筛选(支持多个)                                 | `nations=CN,JP`                      |
+| skills        | array | 按技能筛选(支持多个)                                 | `skills=Go,Python`                   |
+| min_activity  | int | 最近活跃天数                                      | `min_activity=30`                    |
+| min_commits   | int | 最少提交数                                       | `min_commits=1000`                   |
+| min_stars     | int | 最少 star 数                                   | `min_stars=100`                      |
+| min_rank      | float | 最低 TalentRank                               | `min_rank=80`                        |
+| updated_after | string | 更新时间起点(RFC3339格式)                           | `updated_after=2024-01-01T00:00:00Z` |
+| sort_by       | string | 排序字段(talent_rank/star_count/commit_count)   | `sort_by=talent_rank`                |
+| sort_asc      | bool | 是否升序(默认降序)                                  | `sort_asc=true`                      |
+| page          | int | 页码(默认1)                                     | `page=1`                             |
+| page_size     | int | 每页数量(默认10)                                  | `page_size=20`                       |
+
+
+#### 领域分类：
+- **backend**: 后端开发
+- **frontend**: 前端开发
+- **mobile**: 移动开发
+- **ai**: 人工智能
+- **devops**: 运维开发
+- **database**: 数据库
+- **security**: 安全
+- **blockchain**: 区块链
+- **gamedev**: 游戏开发
+- **embedded**: 嵌入式
+- **systems**: 系统开发
+
+#### 示例请求：
+
+1. 搜索中国的 Go 开发者：
+GET /api/search?nations=CN&skills=Go
+2. 搜索后端领域的高影响力开发者：
+GET /api/search?domain=backend&min_stars=1000
+3. 搜索最近活跃的全栈开发者：
+GET /api/search?skills=JavaScript,Python&min_activity=30
+4. 按 TalentRank 排序并筛选：
+GET /api/search?min_rank=80&sort_by=talent_rank&sort_asc=false
+5. 关键词搜索特定地区的开发者：
+GET /api/search?keyword=zhang&nations=CN
+6. 组合多个查询条件：
+GET /api/search?keyword=john&skills=Go,Python&min_stars=1000&sort_by=star_count

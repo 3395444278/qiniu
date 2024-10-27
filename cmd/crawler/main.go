@@ -73,7 +73,7 @@ func main() {
 	for _, username := range userList {
 		username = strings.TrimSpace(username)
 		if username != "" {
-			userChan <- username
+			userChan <- username // 直接发送原始用户名，让 GetUserData 处理清理和验证
 		}
 	}
 	close(userChan)

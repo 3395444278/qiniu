@@ -3,6 +3,7 @@ package crawler
 import (
 	"context"
 	"encoding/json" // 添加这一行
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -16,6 +17,7 @@ import (
 	"unicode"
 
 	"github.com/google/go-github/v45/github"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"golang.org/x/oauth2"
 )
@@ -55,29 +57,64 @@ func NewGitHubCrawler() *GitHubCrawler {
 	}
 }
 
-// GetUserData 获取用基本信息
-func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error) {
+// CleanUsername 清理和验证 GitHub 用户名
+func CleanUsername(rawUsername string) (string, error) {
+	// 如果用户名为空，返回错误
+	if strings.TrimSpace(rawUsername) == "" {
+		return "", fmt.Errorf("empty username")
+	}
+
+	// 对于包含空格的组织名称，保留原样
+	if strings.Contains(rawUsername, " ") {
+		return rawUsername, nil
+	}
+
+	// 对于普通用户名，进行标准验证
+	username := strings.TrimSpace(rawUsername)
+
+	// 检查长度
+	if len(username) > 39 {
+		return "", fmt.Errorf("username too long (max 39 characters): %s", username)
+	}
+
+	return username, nil
+}
+
+// GetUserData 获取用户基本信息
+func (gc *GitHubCrawler) GetUserData(rawUsername string) (*models.Developer, error) {
+	// 清理和验证用户名
+	username, err := CleanUsername(rawUsername)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Printf("Processing cleaned username: %s (original: %s)", username, rawUsername)
+
 	// 1. 检查缓存
-	if cache.RedisClient != nil {
-		cacheKey := fmt.Sprintf("developer:%s", username)
-		if cached, err := cache.RedisClient.Get(gc.ctx, cacheKey).Result(); err == nil {
-			var cacheData struct {
-				Developer *models.Developer `json:"developer"`
-				UpdatedAt time.Time         `json:"updated_at"`
-			}
-			if err := json.Unmarshal([]byte(cached), &cacheData); err == nil {
-				// 检查缓存是否需要更新
-				if !shouldUpdateCache(cacheData.Developer, cacheData.UpdatedAt) {
-					return cacheData.Developer, nil
-				}
-			}
+	if cachedDev, ok := gc.checkCache(username); ok {
+		return cachedDev, nil
+	}
+
+	// 1. 首先检查数据库中是否已存在该用户
+	existingDev, err := models.FindByUsername(username)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			log.Printf("Debug - No existing record found for user: %s, proceeding with creation", username)
+			existingDev = nil // 明确设置为 nil
+		} else {
+			log.Printf("Error querying database: %v", err)
+			return nil, err
 		}
 	}
 
-	// 2. 检查数据库
-	existingDev, err := models.FindByUsername(username)
-	if err != nil && err != mongo.ErrNoDocuments {
-		return nil, err
+	// 打印现有开发者信息
+	if existingDev != nil {
+		log.Printf("Debug - Found existing developer: %s, ID: %s", existingDev.Username, existingDev.ID.Hex())
+		if existingDev.ShouldUpdate() {
+			log.Printf("Debug - Developer needs update")
+		} else {
+			log.Printf("Debug - Developer does not need update")
+		}
 	}
 
 	// 如果存在且不需要更新，直接返回
@@ -99,40 +136,73 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 		return existingDev, nil
 	}
 
-	// 如果Redis客户端可用，尝试从缓存获取
-	if cache.RedisClient != nil {
-		if cached, err := cache.GetCachedDeveloper(username); err == nil && cached != nil {
-			if developer, ok := cached.(*models.Developer); ok {
-				return developer, nil
-			}
-		}
-	}
-
-	// 加超时控制
-	ctx, cancel := context.WithTimeout(gc.ctx, 30*time.Second)
-	defer cancel()
-
-	// 并发获取用户信息和仓库信息
+	// 加超时控制并增加重试机制
 	var user *github.User
 	var repos []*github.Repository
 	var userErr, repoErr error
 
-	wg := sync.WaitGroup{}
-	wg.Add(2)
+	// 重试配置
+	maxRetries := 3
+	baseTimeout := 30 * time.Second
 
-	// 获取用户信息
-	go func() {
-		defer wg.Done()
-		user, _, userErr = gc.client.Users.Get(ctx, username)
-	}()
+	// 获取用户信息（带重试）
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(gc.ctx, baseTimeout*time.Duration(attempt))
 
-	// 获取仓库信息
-	go func() {
-		defer wg.Done()
-		repos, repoErr = gc.GetUserRepositories(username)
-	}()
+		var wg sync.WaitGroup
+		wg.Add(2)
 
-	wg.Wait()
+		// 获取用户信息
+		go func() {
+			defer wg.Done()
+			select {
+			case <-ctx.Done():
+				userErr = ctx.Err()
+				return
+			default:
+				user, _, userErr = gc.client.Users.Get(ctx, username)
+			}
+		}()
+
+		// 获取仓库信息
+		go func() {
+			defer wg.Done()
+			select {
+			case <-ctx.Done():
+				repoErr = ctx.Err()
+				return
+			default:
+				repos, repoErr = gc.GetUserRepositories(username)
+			}
+		}()
+
+		wg.Wait()
+		cancel()
+
+		// 检查是否成功
+		if userErr == nil && repoErr == nil {
+			break
+		}
+
+		// 如果不是超时错误，直接返回
+		if userErr != nil && !errors.Is(userErr, context.DeadlineExceeded) {
+			return nil, userErr
+		}
+		if repoErr != nil && !errors.Is(repoErr, context.DeadlineExceeded) {
+			return nil, repoErr
+		}
+
+		// 记录重试信息
+		log.Printf("Attempt %d failed: %v", attempt, userErr)
+
+		// 最后一次尝试失败
+		if attempt == maxRetries {
+			return nil, fmt.Errorf("failed after %d attempts: %v", maxRetries, userErr)
+		}
+
+		// 等待一段时间后重试
+		time.Sleep(time.Second * time.Duration(attempt))
+	}
 
 	if userErr != nil {
 		return nil, userErr
@@ -144,7 +214,7 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 	// 添加调试日志
 	log.Printf("Debug - Raw avatar URL from GitHub API: %s", user.GetAvatarURL())
 
-	// 获取用户头像 URL - 只在这里获取一次
+	// 获取用户头像 URL - 只在里获取一次
 	avatarURL := user.GetAvatarURL()
 	if avatarURL == "" && user.AvatarURL != nil {
 		avatarURL = *user.AvatarURL
@@ -240,105 +310,30 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 		// 更新现有开发者
 		developer.ID = existingDev.ID
 		developer.CreatedAt = existingDev.CreatedAt
+		log.Printf("Debug - Updating existing developer with ID: %s", developer.ID.Hex())
+
 		if err := developer.Update(); err != nil {
 			return nil, fmt.Errorf("更新用户失败: %v", err)
 		}
 	} else {
-		// 创建新开发者
+		// 创建新开者
+		log.Printf("Debug - Creating new developer for username: %s", username)
+		// 确保 ID 为空，让 MongoDB 自动生成
+		developer.ID = primitive.NilObjectID
+		developer.CreatedAt = time.Now()
+
 		if err := developer.Create(); err != nil {
 			return nil, fmt.Errorf("创建用户失败: %v", err)
 		}
-	}
-
-	// 假设有函数计算项目重要性和贡献度
-	projectImportance := calculateProjectImportance(repos)
-	contributionLevel := gc.calculateContributionLevel(username, repos)
-
-	// 创建 DeveloperMetrics 对象
-	developerMetrics := &models.DeveloperMetrics{}
-
-	// 设置贡献指标
-	developerMetrics.Contributions.CommitCount = contributions
-	developerMetrics.Contributions.Quality = 0.8 // 默认质量分数
-
-	// 设置项目指标
-	developerMetrics.Projects.StarCount = totalStars
-	developerMetrics.Projects.ForkCount = totalForks // 确保这里设置了 ForkCount
-	developerMetrics.Projects.TotalCount = len(repos)
-	developerMetrics.Projects.Quality = projectImportance
-
-	// 设置影响力指标
-	developerMetrics.Influence.Followers = getPtrValue(user.Followers)
-	developerMetrics.Influence.Recognition = contributionLevel
-
-	// 设置活跃度指标
-	developerMetrics.Activity.LastActive = time.Now()
-	developerMetrics.Activity.Frequency = calculateActivityFrequency(contributions)
-	developerMetrics.Activity.Consistency = 0.8 // 默认持续性分数
-	developerMetrics.Activity.Growth = calculateGrowthTrend(contributions)
-
-	// 设置专业度指标（可以从其地方获取）
-	developerMetrics.Expertise.Languages = skills
-	developerMetrics.Expertise.Depth = 0.8 // 可以根据实际情况计算
-
-	// 调用 calculateTalentRank
-	developer.TalentRank = gc.calculateTalentRank(developerMetrics)
-
-	// 处理 Nation 信息
-	nation := extractNation(developer.Location)
-	var nationConfidence float64
-
-	if nation == "" {
-		quickPred := QuickPredictNation(username, user, repos)
-		if quickPred != nil && quickPred.Confidence >= 40 {
-			nation = quickPred.Nation
-			nationConfidence = quickPred.Confidence
-		}
-	} else {
-		nationConfidence = 100
-	}
-
-	developer.Nation = nation
-	developer.NationConfidence = nationConfidence
-
-	// 计算置信（使用新的方法或移除）
-	developer.Confidence = calculateConfidence(
-		contributions,
-		totalStars,
-		getPtrValue(user.Followers),
-		developer.Location != "",
-	)
-
-	// 添加数据验证
-	developer.DataValidation = models.ValidationResult{
-		IsValid:       true,
-		Confidence:    developer.Confidence,
-		LastValidated: time.Now(),
-		// 不要初始化 Issues 字段，让它保持为 nil
-	}
-
-	// 设置更新频率（根据活跃度调整）
-	if developer.CommitCount > 1000 {
-		developer.UpdateFrequency = 24 * time.Hour // 活跃用户每天更新
-	} else {
-		developer.UpdateFrequency = 7 * 24 * time.Hour // 不活跃用户每周更新
-	}
-
-	// 保存到数据库
-	if existingDev != nil {
-		if err := developer.Update(); err != nil {
-			return nil, fmt.Errorf("更新用户失败: %v", err)
-		}
-	} else {
-		if err := developer.Create(); err != nil {
-			return nil, fmt.Errorf("创建用户失败: %v", err)
-		}
+		log.Printf("Debug - Created new developer with ID: %s", developer.ID.Hex())
 	}
 
 	// 验证保存后的数据
 	savedDev, err := models.FindByUsername(developer.Username)
-	if err == nil && savedDev != nil {
-		log.Printf("Debug - Verified Avatar URL after save: %s", savedDev.Avatar)
+	if err != nil {
+		log.Printf("Warning - Failed to verify saved data: %v", err)
+	} else {
+		log.Printf("Debug - Verified saved developer with ID: %s", savedDev.ID.Hex())
 	}
 
 	// 如Redis客户端可用，保存到缓存
@@ -405,13 +400,13 @@ func predictNation(user *github.User, repos []*github.Repository) string {
 
 // analyzeCommitTimes 分析提交时间分
 func analyzeCommitTimes(repos []*github.Repository) []time.Time {
-	// TODO: 实现提交时间分析
+	// TODO: 实现交时间分析
 	return nil
 }
 
 // predictTimezone 据时间分布预测时区
 func predictTimezone(times []time.Time) string {
-	// TODO: 实现时区预测
+	// TODO: 实现时区测
 	return ""
 }
 
@@ -475,56 +470,62 @@ func analyzeRepoInfo(repos []*github.Repository) string {
 
 // GetUserRepositories 优化仓库获取
 func (gc *GitHubCrawler) GetUserRepositories(username string) ([]*github.Repository, error) {
-	// 创建上下文，设置超时
-	ctx, cancel := context.WithTimeout(gc.ctx, 20*time.Second)
-	defer cancel()
-
-	// 设置选项，获取所有仓库（包括fork的）
-	opts := &github.RepositoryListOptions{
-		ListOptions: github.ListOptions{PerPage: 100},
-		Type:        "all",
-		Sort:        "updated",
-		Direction:   "desc",
-	}
-
+	maxRetries := 3
 	var allRepos []*github.Repository
-	for {
-		repos, resp, err := gc.client.Repositories.List(ctx, username, opts)
-		if err != nil {
-			return nil, err
-		}
-		allRepos = append(allRepos, repos...)
+	var lastErr error
 
-		if resp.NextPage == 0 {
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// 创建上下文，设置超时
+		ctx, cancel := context.WithTimeout(gc.ctx, 20*time.Second*time.Duration(attempt))
+		defer cancel()
+
+		// 设置选项，获取所有仓库
+		opts := &github.RepositoryListOptions{
+			ListOptions: github.ListOptions{PerPage: 100},
+			Type:        "all",
+			Sort:        "updated",
+			Direction:   "desc",
+		}
+
+		allRepos = nil // 重置结果
+		for {
+			repos, resp, err := gc.client.Repositories.List(ctx, username, opts)
+			if err != nil {
+				lastErr = err
+				break
+			}
+			allRepos = append(allRepos, repos...)
+
+			if resp.NextPage == 0 {
+				lastErr = nil
+				break
+			}
+			opts.Page = resp.NextPage
+		}
+
+		// 如果成功获取数据，跳出重试循环
+		if lastErr == nil {
 			break
 		}
-		opts.Page = resp.NextPage
+
+		// 如果不是超时错误，直接返回
+		if !errors.Is(lastErr, context.DeadlineExceeded) {
+			return nil, lastErr
+		}
+
+		// 记录重试信息
+		log.Printf("GetUserRepositories attempt %d failed: %v", attempt, lastErr)
+
+		// 最后一次尝试失败
+		if attempt == maxRetries {
+			return nil, fmt.Errorf("failed to get repositories after %d attempts: %v", maxRetries, lastErr)
+		}
+
+		// 等待一段时间后重试
+		time.Sleep(time.Second * time.Duration(attempt))
 	}
 
-	// 使用工作池并发获取详细信息
-	results := make([]*github.Repository, len(allRepos))
-	var wg sync.WaitGroup
-	semaphore := make(chan struct{}, 5) // 限制并发数
-
-	for i, repo := range allRepos {
-		wg.Add(1)
-		go func(i int, repo *github.Repository) {
-			defer wg.Done()
-			semaphore <- struct{}{}        // 获取信号
-			defer func() { <-semaphore }() // 释放信号量
-
-			fullRepo, _, err := gc.client.Repositories.Get(ctx, username, repo.GetName())
-			if err != nil {
-				log.Printf("Warning: Failed to get full repository info for %s: %v", repo.GetName(), err)
-				results[i] = repo // 如果获取失败，使用原始数据
-				return
-			}
-			results[i] = fullRepo
-		}(i, repo)
-	}
-
-	wg.Wait()
-	return results, nil
+	return allRepos, nil
 }
 
 // calculateTalentRank 计算开发者的 TalentRank
@@ -535,7 +536,7 @@ func (gc *GitHubCrawler) calculateTalentRank(metrics *models.DeveloperMetrics) f
 
 // 计算活动频率
 func calculateActivityFrequency(contributions int) float64 {
-	// 简单的活动频率计算
+	// 简单的活动频率算
 	return math.Min(float64(contributions)/1000.0, 1.0)
 }
 
@@ -608,7 +609,7 @@ func (gc *GitHubCrawler) extractLocationFromRepos(repos []*github.Repository) st
 					if strings.Contains(strings.ToLower(line), strings.ToLower(keyword)) {
 						// 提取关键词后的
 						text := line[strings.Index(line, keyword)+len(keyword):]
-						// 清文本
+						// 文本
 						text = strings.TrimSpace(text)
 						text = strings.Trim(text, ":")
 						text = strings.TrimSpace(text)
@@ -648,7 +649,7 @@ func (gc *GitHubCrawler) extractLocationFromRepos(repos []*github.Repository) st
 
 // isValidLocation 验证文本是否看起来像位置信息
 func isValidLocation(text string) bool {
-	// 如果文本太长，可能不是位置信息
+	// 果文本太长，可能不是位置信息
 	if len(text) > 100 {
 		return false
 	}
@@ -680,7 +681,7 @@ func isValidLocation(text string) bool {
 		}
 	}
 
-	// 检查是否匹配任何已知的城市国家名称
+	// 检查否匹配任何已知的城市国家名称
 	if extractNation(text) != "" {
 		return true
 	}
@@ -803,7 +804,7 @@ func QuickPredictNation(username string, user *github.User, repos []*github.Repo
 		factors = append(factors, "中文名称")
 	}
 
-	// 检查特定关键词
+	// 检查特定键词
 	for keyword, country := range map[string]string{
 		"china": "CN",
 		"cn":    "CN",
@@ -936,7 +937,7 @@ func analyzeBasicInfo(username string, repos []*github.Repository) string {
 	return ""
 }
 
-// 计算项目重要性，基于仓库的 star 数、fork 数等
+// 计算项目重要性，基于仓库 star 数、fork 数等
 func calculateProjectImportance(repos []*github.Repository) float64 {
 	if len(repos) == 0 {
 		return 0.0
@@ -946,7 +947,7 @@ func calculateProjectImportance(repos []*github.Repository) float64 {
 	var validRepos int
 
 	for _, repo := range repos {
-		// 跳过 fork 的仓库
+		// 跳过 fork 的库
 		if repo.GetFork() {
 			continue
 		}
@@ -986,7 +987,7 @@ func calculateProjectImportance(repos []*github.Repository) float64 {
 		return 0.0
 	}
 
-	// 计算平均分并归一化到 0-1 范围
+	// 计算平均分并归一化到 0-1 ���围
 	avgScore := totalScore / float64(validRepos)
 	normalizedScore := math.Min(avgScore/10.0, 1.0)
 
@@ -1058,7 +1059,7 @@ func (gc *GitHubCrawler) getRepoTotalCommits(owner, repoName string) int {
 		return 0
 	}
 
-	totalCommits := comparison.GetTotalCommits() + 1 // 加上初始提交
+	totalCommits := comparison.GetTotalCommits() + 1 // 加初始提交
 	return totalCommits
 }
 
@@ -1103,7 +1104,7 @@ func calculateConfidence(contributions, stars, followers int, hasLocation bool) 
 	// 根据关注者数调整置信度
 	followerConfidence := math.Min(float64(followers)/1000.0, 0.1)
 
-	// 位置信息提供额外置信度
+	// 位信息提供额外置信度
 	locationConfidence := 0.0
 	if hasLocation {
 		locationConfidence = 0.1
@@ -1147,7 +1148,7 @@ func generateCacheKey(username string) string {
 	return fmt.Sprintf("developer:%s", username)
 }
 
-// 添加缓存时间计算函数
+// 加缓存时间计算函
 func calculateCacheExpiration(developer *models.Developer) time.Duration {
 	// 根据用户活跃度动态调整缓存时间
 	if developer.CommitCount > 1000 {
@@ -1193,7 +1194,7 @@ func shouldUpdateCache(developer *models.Developer, cachedTime time.Time) bool {
 		return true
 	}
 
-	// 2. 检查用户最近是否有活动
+	// 2. 检用户最近是否有活动
 	if time.Since(developer.LastUpdated) < 6*time.Hour {
 		return true
 	}
@@ -1204,4 +1205,62 @@ func shouldUpdateCache(developer *models.Developer, cachedTime time.Time) bool {
 	}
 
 	return false
+}
+
+// checkCache 检查并返回缓存的开发者数据
+func (gc *GitHubCrawler) checkCache(username string) (*models.Developer, bool) {
+	if cache.RedisClient == nil {
+		return nil, false
+	}
+
+	cacheKey := fmt.Sprintf("developer:%s", username)
+	cached, err := cache.RedisClient.Get(gc.ctx, cacheKey).Result()
+	if err != nil {
+		return nil, false
+	}
+
+	var cacheData struct {
+		Developer *models.Developer `json:"developer"`
+		UpdatedAt time.Time         `json:"updated_at"`
+	}
+
+	if err := json.Unmarshal([]byte(cached), &cacheData); err != nil {
+		return nil, false
+	}
+
+	if !shouldUpdateCache(cacheData.Developer, cacheData.UpdatedAt) {
+		return cacheData.Developer, true
+	}
+
+	return nil, false
+}
+
+// calculateMetrics 计算开发者的各项指标
+func (gc *GitHubCrawler) calculateMetrics(user *github.User, repos []*github.Repository) *models.DeveloperMetrics {
+	metrics := &models.DeveloperMetrics{}
+
+	// 计算项目重要性
+	projectImportance := calculateProjectImportance(repos)
+
+	// 计算贡献度
+	contributionLevel := gc.calculateContributionLevel(getPtrValue(user.Login), repos)
+
+	// 设置各项指标...
+	metrics.Projects.Quality = projectImportance
+	metrics.Influence.Recognition = contributionLevel
+	// ... 其他指标设置
+
+	return metrics
+}
+
+// validateDeveloperData 验证开发者数据
+func validateDeveloperData(developer *models.Developer) error {
+	if developer.Username == "" {
+		return fmt.Errorf("username cannot be empty")
+	}
+	if developer.Avatar == "" {
+		log.Printf("Warning: Developer %s has no avatar URL", developer.Username)
+	}
+	// 其他验证...
+	return nil
 }
