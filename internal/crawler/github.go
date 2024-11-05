@@ -8,6 +8,7 @@ import (
 	"os"
 	"qinniu/internal/models"
 	"qinniu/internal/pkg/cache"
+	"qinniu/internal/pkg/queue"
 	"regexp"
 	"sort"
 	"strings"
@@ -183,6 +184,7 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 	for skill := range skillMap {
 		skills = append(skills, skill)
 	}
+
 	sort.Strings(skills)
 
 	// 计算总 star 数和 fork 数
@@ -220,6 +222,7 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 		Email:        getPtrValue(user.Email),
 		Location:     getPtrValue(user.Location),
 		Avatar:       avatarURL,
+		ProfileURL:   user.GetHTMLURL(),
 		UpdatedAt:    time.Now(),
 		LastUpdated:  time.Now(),
 		Skills:       skills,
@@ -228,7 +231,6 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 		CommitCount:  contributions,
 		ForkCount:    totalForks,
 	}
-
 	// 添加调试日志，确认 developer 对象中的 Avatar 字段
 	log.Printf("Debug - Developer object created with Avatar URL: %s", developer.Avatar)
 
@@ -308,6 +310,8 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 
 	// 保存到数据库
 	if existingDev != nil {
+		developer.ID = existingDev.ID
+		developer.CreatedAt = existingDev.CreatedAt
 		if err := developer.Update(); err != nil {
 			return nil, fmt.Errorf("更新用户失败: %v", err)
 		}
@@ -317,10 +321,29 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 		}
 	}
 
+	// 创建并发送评估任务
+	evaluationTask := &queue.EvaluationTask{
+		Username:     developer.Username,
+		ProfileURL:   developer.ProfileURL,
+		BlogURL:      user.GetBlog(),
+		Description:  user.GetBio(),
+		Repositories: developer.Repositories,
+		CreatedAt:    time.Now(),
+	}
+
+	// 发送评估任务到队列
+	queueClient := queue.NewQueue()
+	if err := queueClient.Publish(evaluationTask); err != nil {
+		log.Printf("Warning: Failed to publish evaluation task for %s: %v", username, err)
+	} else {
+		log.Printf("Successfully published evaluation task for %s", username)
+	}
+
 	// 验证保存后的数据
 	savedDev, err := models.FindByUsername(developer.Username)
 	if err == nil && savedDev != nil {
-		log.Printf("Debug - Verified Avatar URL after save: %s", savedDev.Avatar)
+		log.Printf("Debug - Verified saved data for %s, tech_evaluation: %+v",
+			savedDev.Username, savedDev.TechEvaluation)
 	}
 
 	// 如Redis客户端可用，保存到缓存
@@ -524,7 +547,7 @@ func (gc *GitHubCrawler) extractSkills(repos []*github.Repository) []string {
 			skillMap[*repo.Language] = struct{}{}
 		}
 
-		// 获取仓库的所有语言
+		// 获取���库的所有语���
 		ctx := context.Background()
 		languages, _, err := gc.client.Repositories.ListLanguages(ctx, getPtrValue(repo.Owner.Login), getPtrValue(repo.Name))
 		if err != nil {

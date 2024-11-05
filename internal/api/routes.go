@@ -24,5 +24,7 @@ func SetupRoutes(r *gin.Engine) {
 			authorized.PUT("/developers/:id", handlers.UpdateDeveloper)
 			authorized.DELETE("/developers/:id", handlers.DeleteDeveloper)
 		}
+
+		api.GET("/nations", handlers.GetAllNations)
 	}
 }
