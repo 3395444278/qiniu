@@ -350,7 +350,7 @@ func SearchWithOptions(query bson.M, page, pageSize int64, opts ...*options.Find
 	return developers, nil
 }
 
-// ���增：定期更新机制
+// 增：定期更新机制
 func (d *Developer) ShouldUpdate() bool {
 	return time.Since(d.LastUpdated) > d.UpdateFrequency
 }

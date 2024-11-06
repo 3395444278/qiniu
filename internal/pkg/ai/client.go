@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 )
@@ -115,69 +114,55 @@ func (c *Client) EvaluateDeveloper(ctx context.Context, info map[string]interfac
 }
 
 func buildEvaluationPrompt(info map[string]interface{}) string {
-	return fmt.Sprintf(`请根据以下信息全面评估该开发者的技术能力，并以 JSON 格式返回评估结果：
+	return fmt.Sprintf(`请根据以下信息评估该开发者的技术能力，重点分析其可能所在的国家/地区。请特别关注：
+1. 用户名特征
+2. 代码注释语言
+3. 项目描述语言
+4. 技术栈特点
+5. 活跃时间规律
 
-开发者基本信息：
+开发者信息：
 - 用户名：%v
-- 姓名：%v
-- 简介：%v
-- 位置：%v
+- 名称：%v
 - 邮箱：%v
-
-在线资料：
-- GitHub 主页：%v
-- 博客：%v
-- 个人网站：%v
-
-技术信息：
+- 位置：%v
+- GitHub主页：%v
 - 技术栈：%v
 - 编程语言：%v
 - 主要仓库：%v
-- 仓库链接：%v
-
-贡献统计：
-- Stars 总数：%v
-- Commits 总数：%v
-- Forks 总数：%v
-- 各仓库 Stars：%v
-
-活跃度：
+- 提交数：%v
+- Stars数：%v
+- Forks数：%v
 - 最近活跃：%v
-- 账号创建：%v
-- 最后更新：%v
 
-请返回以下格式的 JSON：
+请以JSON格式返回以下信息：
 {
-    "specialties": ["主要专长领域1", "主要专长领域2", ...],
-    "experience": {
-        "技术1": "详细的经验评估",
-        "技术2": "详细的经验评估",
-        ...
-    },
-    "evaluation": "全面的技术能力评价，包括技术深度、广度、项目质量等方面"
-}
-`,
-		info["username"], info["name"], info["bio"], info["location"], info["email"],
-		info["profile_url"], info["blog"], info["personal_site"],
-		info["skills"], info["languages"], info["repos"], info["repo_urls"],
-		info["stars"], info["commits"], info["forks"], info["repo_stars"],
-		info["last_active"], info["created_at"], info["updated_at"])
+    "nation": "CN",  // 两位国家代码：CN中国,US美国,JP日本,KR韩国,SG新加坡等
+    "confidence": 85, // 置信度0-100
+    "reasons": ["原因1", "原因2"], // 判断依据
+    "specialties": ["专长1", "专长2"],
+    "evaluation": "整体评价"
+}`,
+		info["username"], info["name"], info["email"], info["location"],
+		info["profile_url"], info["skills"], info["languages"],
+		info["repos"], info["commits"], info["stars"],
+		info["forks"], info["last_active"])
 }
 
 type EvaluationResult struct {
 	Specialties   []string          `json:"specialties"`
 	Experience    map[string]string `json:"experience"`
 	AIEvaluation  string            `json:"evaluation"`
+	Nation        string            `json:"nation"`
+	Confidence    float64           `json:"confidence"`
 	LastEvaluated time.Time         `json:"last_evaluated"`
 }
 
 func parseAIResponse(response string) (*EvaluationResult, error) {
 	log.Printf("Raw AI response: %s", response)
 
-	// 首先尝试清理响应中的 JSON 字符串
 	cleanedResponse := response
 	if strings.Contains(response, "```json") {
-		// 提取 JSON 部分
 		start := strings.Index(response, "```json\n") + 8
 		end := strings.Index(response[start:], "```")
 		if end != -1 {
@@ -185,103 +170,29 @@ func parseAIResponse(response string) (*EvaluationResult, error) {
 		}
 	}
 
-	// 尝试解析 JSON
-	var result struct {
-		Specialties []string          `json:"specialties"`
-		Experience  map[string]string `json:"experience"`
-		Evaluation  string            `json:"evaluation"`
+	// 定义一个临时结构体来解析完整的响应
+	var temp struct {
+		Nation      string   `json:"nation"`
+		Confidence  float64  `json:"confidence"`
+		Reasons     []string `json:"reasons"`
+		Specialties []string `json:"specialties"`
+		Evaluation  string   `json:"evaluation"`
 	}
 
-	if err := json.Unmarshal([]byte(cleanedResponse), &result); err != nil {
+	if err := json.Unmarshal([]byte(cleanedResponse), &temp); err != nil {
 		log.Printf("Error parsing AI response: %v", err)
-
-		// 如果解析失败，尝试提取有用信息
-		specialties := extractSpecialties(response)
-		experience := extractExperience(response)
-		evaluation := extractEvaluation(response)
-
-		// 确保返回的 map 不为 nil
-		if experience == nil {
-			experience = make(map[string]string)
-		}
-
-		// 返回提取的信息
-		return &EvaluationResult{
-			Specialties:   specialties,
-			Experience:    experience,
-			AIEvaluation:  evaluation,
-			LastEvaluated: time.Now(),
-		}, nil
+		return nil, fmt.Errorf("解析 AI 响应失败: %v", err)
 	}
 
-	// 确保返回的 map 不为 nil
-	if result.Experience == nil {
-		result.Experience = make(map[string]string)
-	}
-	if result.Specialties == nil {
-		result.Specialties = make([]string, 0)
-	}
-
-	// JSON 解析成功
-	return &EvaluationResult{
-		Specialties:   result.Specialties,
-		Experience:    result.Experience,
-		AIEvaluation:  result.Evaluation,
+	// 转换为 EvaluationResult
+	result := &EvaluationResult{
+		Specialties:   temp.Specialties,
+		Experience:    make(map[string]string),
+		AIEvaluation:  temp.Evaluation,
+		Nation:        temp.Nation,
+		Confidence:    temp.Confidence,
 		LastEvaluated: time.Now(),
-	}, nil
-}
-
-// 辅助函数：提取专长信息
-func extractSpecialties(text string) []string {
-	specialties := make([]string, 0)
-	re := regexp.MustCompile(`专长[：:]\s*(.*?)(?:\n|$)`)
-	matches := re.FindStringSubmatch(text)
-	if len(matches) > 1 {
-		// 分割并清理结果
-		for _, s := range strings.Split(matches[1], ",") {
-			s = strings.TrimSpace(s)
-			if s != "" {
-				specialties = append(specialties, s)
-			}
-		}
-	}
-	return specialties
-}
-
-// 辅助函数：提取经验信息
-func extractExperience(text string) map[string]string {
-	experience := make(map[string]string)
-	re := regexp.MustCompile(`(\w+)[：:]\s*(.*?)(?:\n|$)`)
-	matches := re.FindAllStringSubmatch(text, -1)
-	for _, match := range matches {
-		if len(match) > 2 {
-			tech := strings.TrimSpace(match[1])
-			level := strings.TrimSpace(match[2])
-			if tech != "" && level != "" {
-				experience[tech] = level
-			}
-		}
-	}
-	return experience
-}
-
-// 辅助函数：提取评估信息
-func extractEvaluation(text string) string {
-	// 首先尝试提取 evaluation 字段
-	var result struct {
-		Evaluation string `json:"evaluation"`
-	}
-	if err := json.Unmarshal([]byte(text), &result); err == nil && result.Evaluation != "" {
-		return result.Evaluation
 	}
 
-	// 如果失败，尝试使用正则表达式
-	re := regexp.MustCompile(`评[价估][：:]\s*(.*?)(?:\n|$)`)
-	matches := re.FindStringSubmatch(text)
-	if len(matches) > 1 {
-		return strings.TrimSpace(matches[1])
-	}
-
-	// 如果都失败了，返回整个文本
-	return strings.TrimSpace(text)
+	return result, nil
 }
