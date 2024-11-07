@@ -1,10 +1,11 @@
 package api
 
 import (
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
 	"qinniu/internal/api/handlers"
 	"qinniu/internal/api/middleware"
-
-	"github.com/gin-gonic/gin"
+	"time"
 )
 
 func SetupRoutes(r *gin.Engine) {
@@ -27,4 +28,19 @@ func SetupRoutes(r *gin.Engine) {
 
 		api.GET("/nations", handlers.GetAllNations)
 	}
+}
+
+func CrossOriginMiddleware() gin.HandlerFunc {
+
+	return cors.New(cors.Config{
+		AllowOrigins:     []string{"*"},
+		AllowMethods:     []string{"PUT", "PATCH", "POST", "GET", "OPTIONS", "DELETE"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Content-Length", "Token", "Authorization", "Access-Control-Allow-Headers"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+		AllowOriginFunc: func(origin string) bool {
+			return origin == "https://github.com"
+		},
+		MaxAge: 12 * time.Hour,
+	})
 }

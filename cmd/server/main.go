@@ -35,6 +35,9 @@ func main() {
 	// 创建Gin引擎
 	r := gin.Default()
 
+	// 设置跨域
+	r.Use(api.CrossOriginMiddleware())
+
 	// 设置路由
 	api.SetupRoutes(r)
 
