@@ -37,6 +37,10 @@ type Developer struct {
 	DataValidation   ValidationResult   `bson:"data_validation" json:"data_validation"`
 	UpdateFrequency  time.Duration      `bson:"update_frequency" json:"update_frequency"`
 	Avatar           string             `bson:"avatar,omitempty" json:"avatar,omitempty"`
+	ProfileURL       string             `bson:"profile_url,omitempty" json:"profile_url,omitempty"`
+	RepositoryURLs   map[string]string  `bson:"repository_urls,omitempty" json:"repository_urls,omitempty"`
+	RepoStars        map[string]int     `bson:"repo_stars,omitempty" json:"repo_stars,omitempty"`
+	TechEvaluation   TechEvaluation     `bson:"tech_evaluation,omitempty" json:"tech_evaluation,omitempty"`
 	// 添加其他必要的字段
 }
 
@@ -48,10 +52,20 @@ type ValidationResult struct {
 	Issues        []string  `bson:"issues,omitempty" json:"issues,omitempty"` // 添加 omitempty
 }
 
+type TechEvaluation struct {
+	BlogURL         string            `bson:"blog_url,omitempty" json:"blog_url,omitempty"`
+	PersonalSiteURL string            `bson:"personal_site_url,omitempty" json:"personal_site_url,omitempty"`
+	Biography       string            `bson:"biography,omitempty" json:"biography,omitempty"`
+	Specialties     []string          `bson:"specialties,omitempty" json:"specialties,omitempty"`
+	Experience      map[string]string `bson:"experience,omitempty" json:"experience,omitempty"`
+	AIEvaluation    string            `bson:"ai_evaluation,omitempty" json:"ai_evaluation,omitempty"`
+	LastEvaluated   time.Time         `bson:"last_evaluated,omitempty" json:"last_evaluated,omitempty"`
+}
+
 const collectionName = "developers"
 
 // GetCollection 获取开发者集合
-func getCollection() *mongo.Collection {
+func GetCollection() *mongo.Collection {
 	return database.DB.Collection(collectionName)
 }
 
@@ -88,7 +102,7 @@ func (d *Developer) Create() error {
 	d.ID = primitive.NilObjectID
 
 	// 插入文档，包括 Avatar 字段
-	result, err := getCollection().InsertOne(ctx, d)
+	result, err := GetCollection().InsertOne(ctx, d)
 	if err != nil {
 		log.Printf("Error creating developer: %v", err)
 		return err
@@ -98,7 +112,7 @@ func (d *Developer) Create() error {
 
 	// 验证插入后的数据
 	var inserted Developer
-	err = getCollection().FindOne(ctx, bson.M{"_id": d.ID}).Decode(&inserted)
+	err = GetCollection().FindOne(ctx, bson.M{"_id": d.ID}).Decode(&inserted)
 	if err != nil {
 		log.Printf("Error verifying inserted data: %v", err)
 	} else {
@@ -145,11 +159,15 @@ func (d *Developer) Update() error {
 			"data_validation":   d.DataValidation,
 			"update_frequency":  d.UpdateFrequency,
 			"avatar":            d.Avatar, // 确保包含 Avatar 字段
+			"profile_url":       d.ProfileURL,
+			"repository_urls":   d.RepositoryURLs,
+			"repo_stars":        d.RepoStars,
+			"tech_evaluation":   d.TechEvaluation,
 			// 不要包含 "_id" 字段
 		},
 	}
 
-	_, err := getCollection().UpdateOne(ctx, filter, update)
+	_, err := GetCollection().UpdateOne(ctx, filter, update)
 	return err
 }
 
@@ -158,7 +176,7 @@ func (d *Developer) Delete() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	_, err := getCollection().DeleteOne(ctx, bson.M{"_id": d.ID})
+	_, err := GetCollection().DeleteOne(ctx, bson.M{"_id": d.ID})
 	return err
 }
 
@@ -173,7 +191,7 @@ func FindByID(id string) (*Developer, error) {
 	}
 
 	var developer Developer
-	err = getCollection().FindOne(ctx, bson.M{"_id": objectID}).Decode(&developer)
+	err = GetCollection().FindOne(ctx, bson.M{"_id": objectID}).Decode(&developer)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +206,7 @@ func FindByUsername(username string) (*Developer, error) {
 	defer cancel()
 
 	var developer Developer
-	err := getCollection().FindOne(ctx, bson.M{"username": username}).Decode(&developer)
+	err := GetCollection().FindOne(ctx, bson.M{"username": username}).Decode(&developer)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil // 返回 nil, nil 表示未找到
@@ -233,8 +251,8 @@ func FindAll(page, pageSize int64) ([]*Developer, error) {
 		}},
 	}
 
-	// 执��合查询
-	cursor, err := getCollection().Aggregate(ctx, pipeline)
+	// 执合查询
+	cursor, err := GetCollection().Aggregate(ctx, pipeline)
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +281,7 @@ func Search(query bson.M, page, pageSize int64) ([]*Developer, error) {
 		SetLimit(pageSize).
 		SetSort(bson.D{{Key: "talent_rank", Value: -1}})
 
-	cursor, err := getCollection().Find(ctx, query, opts)
+	cursor, err := GetCollection().Find(ctx, query, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +313,7 @@ func BatchCreate(developers []*Developer) error {
 	}
 
 	// 执行批量插入
-	result, err := getCollection().InsertMany(ctx, docs)
+	result, err := GetCollection().InsertMany(ctx, docs)
 	if err != nil {
 		return err
 	}
@@ -318,7 +336,7 @@ func SearchWithOptions(query bson.M, page, pageSize int64, opts ...*options.Find
 	findOpts.SetSkip((page - 1) * pageSize)
 	findOpts.SetLimit(pageSize)
 
-	cursor, err := getCollection().Find(ctx, query, findOpts)
+	cursor, err := GetCollection().Find(ctx, query, findOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -332,7 +350,7 @@ func SearchWithOptions(query bson.M, page, pageSize int64, opts ...*options.Find
 	return developers, nil
 }
 
-// 新增：定期更新机制
+// 增：定期更新机制
 func (d *Developer) ShouldUpdate() bool {
 	return time.Since(d.LastUpdated) > d.UpdateFrequency
 }
@@ -346,7 +364,7 @@ func FindTopDevelopers(limit int) ([]*Developer, error) {
 		SetLimit(int64(limit)).
 		SetSort(bson.D{{Key: "talent_rank", Value: -1}})
 
-	cursor, err := getCollection().Find(ctx, bson.M{}, opts)
+	cursor, err := GetCollection().Find(ctx, bson.M{}, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -388,10 +406,14 @@ func AggregateSearch(pipeline []bson.M) ([]*Developer, error) {
 			"last_updated":      1,
 			"avatar":            1,
 			"update_frequency":  1,
+			"profile_url":       1,
+			"repository_urls":   1,
+			"repo_stars":        1,
+			"tech_evaluation":   1,
 		},
 	})
 
-	cursor, err := getCollection().Aggregate(ctx, pipeline)
+	cursor, err := GetCollection().Aggregate(ctx, pipeline)
 	if err != nil {
 		return nil, err
 	}
@@ -415,13 +437,13 @@ func DeleteByUsername(username string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	_, err := getCollection().DeleteMany(ctx, bson.M{"username": username})
+	_, err := GetCollection().DeleteMany(ctx, bson.M{"username": username})
 	return err
 }
 
 // CountDevelopers 统计符合条件的开发者数量
 func CountDevelopers(query bson.M) (int64, error) {
-	collection := getCollection() // 使用已定义的 getCollection 函数
+	collection := GetCollection() // 使用已定义的 getCollection 函数
 	count, err := collection.CountDocuments(context.Background(), query)
 	if err != nil {
 		return 0, err

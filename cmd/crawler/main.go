@@ -4,10 +4,14 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"qinniu/internal/crawler"
 	"qinniu/internal/models"
+	"qinniu/internal/pkg/ai"
 	"qinniu/internal/pkg/cache"
 	"qinniu/internal/pkg/database"
+	"qinniu/internal/pkg/queue"
+	"qinniu/internal/worker"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +37,32 @@ func main() {
 	} else {
 		log.Println("Successfully connected to Redis")
 	}
+
+	// 启动评估服务
+	go func() {
+		log.Println("Starting evaluator service...")
+
+		// 初始化 AI 客户端
+		apiKey := os.Getenv("AI_API_KEY")
+		if apiKey == "" {
+			log.Fatal("AI_API_KEY environment variable not set")
+		}
+
+		log.Printf("Using AI API key: %s...", apiKey[:10])
+
+		aiClient := ai.NewClient(apiKey)
+		queueClient := queue.NewQueue()
+		evaluator := worker.NewEvaluator(aiClient, queueClient)
+
+		log.Println("Evaluator service started, waiting for tasks...")
+		if err := evaluator.Start(); err != nil {
+			log.Printf("Error starting evaluator: %v", err)
+			return
+		}
+
+		// 保持评估服务运行
+		select {}
+	}()
 
 	// 支持多用户名输入
 	usernames := flag.String("users", "", "GitHub usernames to analyze (comma-separated)")
@@ -61,8 +91,6 @@ func main() {
 					log.Printf("Error processing user %s: %v\n", username, err)
 					continue
 				}
-
-				// 打印结果
 				printResult(developer)
 			}
 		}()
@@ -73,13 +101,17 @@ func main() {
 	for _, username := range userList {
 		username = strings.TrimSpace(username)
 		if username != "" {
-			userChan <- username // 直接发送原始用户名，让 GetUserData 处理清理和验证
+			userChan <- username
 		}
 	}
 	close(userChan)
 
 	// 等待所有工作完成
 	wg.Wait()
+
+	// 等待一段时间，确保评估任务被处理
+	log.Println("Waiting for evaluation tasks to complete...")
+	time.Sleep(5 * time.Second)
 }
 
 // 添加重试机制

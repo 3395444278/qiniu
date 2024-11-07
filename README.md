@@ -106,8 +106,6 @@ GET /health
 }
 ```
 
-```
-
 ### 3. 获取单个开发者信息
 
 ```http
@@ -148,8 +146,6 @@ GET /api/developers/{id}
   }
 }
 ```
-
-
 
 ### 5. 创建开发者
 
@@ -294,6 +290,10 @@ DELETE /api/developers/{id}
 }
 ```
 
+
+
+
+
 ## 技术栈
 
 - **后端**: Go 1.20+
@@ -394,8 +394,6 @@ curl -X GET "http://api.example.com/api/developers/torvalds" \
   -H "Authorization: Bearer your_token"
 ```
 
-
-
 ### 搜索开发者
 GET /api/search
 
@@ -419,7 +417,6 @@ GET /api/search
 | sort_asc      | bool | 是否升序(默认降序)                                  | `sort_asc=true`                      |
 | page          | int | 页码(默认1)                                     | `page=1`                             |
 | page_size     | int | 每页数量(默认10)                                  | `page_size=20`                       |
-
 
 #### 领域分类：
 - **backend**: 后端开发
@@ -448,3 +445,21 @@ GET /api/search?min_rank=80&sort_by=talent_rank&sort_asc=false
 GET /api/search?keyword=zhang&nations=CN
 6. 组合多个查询条件：
 GET /api/search?keyword=john&skills=Go,Python&min_stars=1000&sort_by=star_count
+
+## AI 评估功能
+
+系统现在支持自动评估开发者的技术能力：
+
+- 分析 GitHub 个人简介
+- 分析博客内容
+- 分析仓库贡献
+- 生成技术专长评估
+- 生成经验水平评估
+- 生成整体技术评价
+
+### 启动服务
+
+1. 确保 Redis 已启动：
+
+```bash
+redis

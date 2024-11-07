@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"qinniu/internal/models"
 
@@ -106,15 +108,19 @@ func SearchDevelopers(c *gin.Context) {
 	}
 
 	// 3. 按国家筛选（支持多个国家）
-	if nations := c.QueryArray("nations"); len(nations) > 0 {
+	if nations := strings.Split(c.Query("nations"), ","); len(nations) > 0 {
 		nationQueries := make([]bson.M, 0)
 		for _, nation := range nations {
-			nationQueries = append(nationQueries, bson.M{
-				"nation":            strings.ToUpper(nation),
-				"nation_confidence": bson.M{"$gte": 60},
-			})
+			if nation = strings.TrimSpace(nation); nation != "" {
+				nationQueries = append(nationQueries, bson.M{
+					"nation":            strings.ToUpper(nation),
+					"nation_confidence": bson.M{"$gte": 60},
+				})
+			}
 		}
-		conditions = append(conditions, bson.M{"$or": nationQueries})
+		if len(nationQueries) > 0 {
+			conditions = append(conditions, bson.M{"$or": nationQueries})
+		}
 	}
 
 	// 4. 按技能筛选（支持多个技能）
@@ -161,6 +167,24 @@ func SearchDevelopers(c *gin.Context) {
 		}
 	}
 
+	// 添加仓库星星数范围筛选
+	if repoStars := c.Query("repo_stars"); repoStars != "" {
+		stars, err := strconv.Atoi(repoStars)
+		if err == nil {
+			conditions = append(conditions, bson.M{
+				"repo_stars": bson.M{"$elemMatch": bson.M{"$gte": stars}},
+			})
+		}
+	}
+
+	// 添加特定仓库名称搜索
+	if repoName := c.Query("repo_name"); repoName != "" {
+		conditions = append(conditions, bson.M{
+			"repository_urls": bson.M{"$exists": true},
+			"$where":          fmt.Sprintf("Object.keys(this.repository_urls).some(k => k.toLowerCase().includes('%s'.toLowerCase()))", repoName),
+		})
+	}
+
 	// 组合查询条件
 	query := bson.M{}
 	if len(conditions) > 0 {
@@ -185,6 +209,34 @@ func SearchDevelopers(c *gin.Context) {
 		{"$sort": bson.M{sortField: sortOrder}},
 		{"$skip": (page - 1) * pageSize},
 		{"$limit": pageSize},
+		// 修改投影，只包含需要的字段
+		{"$project": bson.M{
+			"_id":               1,
+			"username":          1,
+			"name":              1,
+			"email":             1,
+			"location":          1,
+			"nation":            1,
+			"nation_confidence": bson.M{"$toDouble": "$nation_confidence"},
+			"talent_rank":       bson.M{"$toDouble": "$talent_rank"},
+			"confidence":        bson.M{"$toDouble": "$confidence"},
+			"skills":            1,
+			"repositories":      1,
+			"created_at":        1,
+			"updated_at":        1,
+			"last_active":       1,
+			"commit_count":      bson.M{"$toInt": "$commit_count"},
+			"star_count":        bson.M{"$toInt": "$star_count"},
+			"fork_count":        bson.M{"$toInt": "$fork_count"},
+			"last_updated":      1,
+			"avatar":            1,
+			"profile_url":       1,
+			"repository_urls":   1,
+			"repo_stars":        1,
+			"data_validation":   1,
+			"update_frequency":  1,
+			// 不包含 tech_evaluation 字段，而不是显式排除
+		}},
 	}
 
 	// 执行聚合查询
@@ -277,4 +329,60 @@ func DeleteDeveloper(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "开发者已删除"})
+}
+
+// GetAllNations 获取所有国家
+func GetAllNations(c *gin.Context) {
+	// 使用聚合管道获取去重的国家列表
+	pipeline := []bson.M{
+		{
+			"$match": bson.M{
+				"nation": bson.M{
+					"$exists": true,
+					"$ne":     "",
+				},
+			},
+		},
+		{
+			"$group": bson.M{
+				"_id":   "$nation",
+				"count": bson.M{"$sum": 1},
+			},
+		},
+		{
+			"$project": bson.M{
+				"nation": "$_id",
+				"count":  1,
+				"_id":    0,
+			},
+		},
+		{
+			"$sort": bson.M{"count": -1},
+		},
+	}
+
+	collection := models.GetCollection()
+	cursor, err := collection.Aggregate(context.Background(), pipeline)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer cursor.Close(context.Background())
+
+	type NationInfo struct {
+		Nation string `json:"nation"`
+		Count  int    `json:"count"`
+	}
+
+	var nations []NationInfo
+	if err := cursor.All(context.Background(), &nations); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "success",
+		"data":    nations,
+	})
 }

@@ -2,12 +2,14 @@ package crawler
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"math"
 	"os"
 	"qinniu/internal/models"
 	"qinniu/internal/pkg/cache"
+	"qinniu/internal/pkg/queue"
 	"regexp"
 	"sort"
 	"strings"
@@ -15,14 +17,17 @@ import (
 	"time"
 	"unicode"
 
+	"qinniu/internal/pkg/ai"
+
 	"github.com/google/go-github/v45/github"
 	"go.mongodb.org/mongo-driver/mongo"
 	"golang.org/x/oauth2"
 )
 
 type GitHubCrawler struct {
-	client *github.Client
-	ctx    context.Context
+	client   *github.Client
+	ctx      context.Context
+	aiClient *ai.Client
 }
 
 func NewGitHubCrawler() *GitHubCrawler {
@@ -49,9 +54,23 @@ func NewGitHubCrawler() *GitHubCrawler {
 
 	log.Println("GitHub token 验证成功")
 
+	// 初始化 AI 客户端
+	aiApiKey := os.Getenv("AI_API_KEY")
+	if aiApiKey == "" {
+		log.Printf("Warning: DEEPSEEK_API_KEY not found, AI prediction will be disabled")
+		return &GitHubCrawler{
+			client: client,
+			ctx:    ctx,
+		}
+	}
+
+	aiClient := ai.NewClient(aiApiKey)
+	log.Printf("AI client initialized successfully")
+
 	return &GitHubCrawler{
-		client: client,
-		ctx:    ctx,
+		client:   client,
+		ctx:      ctx,
+		aiClient: aiClient,
 	}
 }
 
@@ -91,7 +110,7 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 		return nil, err
 	}
 
-	// 如果存在且不需要更新，直接返回
+	// 如果存在且不需要更新，直返回
 	if existingDev != nil && !existingDev.ShouldUpdate() {
 		return existingDev, nil
 	}
@@ -183,6 +202,7 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 	for skill := range skillMap {
 		skills = append(skills, skill)
 	}
+
 	sort.Strings(skills)
 
 	// 计算总 star 数和 fork 数
@@ -220,6 +240,7 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 		Email:        getPtrValue(user.Email),
 		Location:     getPtrValue(user.Location),
 		Avatar:       avatarURL,
+		ProfileURL:   user.GetHTMLURL(),
 		UpdatedAt:    time.Now(),
 		LastUpdated:  time.Now(),
 		Skills:       skills,
@@ -228,7 +249,6 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 		CommitCount:  contributions,
 		ForkCount:    totalForks,
 	}
-
 	// 添加调试日志，确认 developer 对象中的 Avatar 字段
 	log.Printf("Debug - Developer object created with Avatar URL: %s", developer.Avatar)
 
@@ -253,7 +273,7 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 	developerMetrics.Influence.Followers = getPtrValue(user.Followers)
 	developerMetrics.Influence.Recognition = contributionLevel
 
-	// 设置活跃度指标
+	// 设置活跃度指
 	developerMetrics.Activity.LastActive = time.Now()
 	developerMetrics.Activity.Frequency = calculateActivityFrequency(contributions)
 	developerMetrics.Activity.Consistency = 0.8 // 默认持续性分数
@@ -267,8 +287,19 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 	developer.TalentRank = gc.calculateTalentRank(developerMetrics)
 
 	// 处理 Nation 信息
-	nation := extractNation(developer.Location)
 	var nationConfidence float64
+	nation := extractNation(developer.Location)
+	if nation == "" {
+		log.Printf("尝试使用 AI 预测国家...")
+		aiNation, aiConfidence := gc.predictNationWithAI(user, repos)
+		if aiNation != "" {
+			nation = aiNation
+			nationConfidence = aiConfidence
+			log.Printf("AI 预测成功 - 国家: %s, 置信度: %.2f", nation, nationConfidence)
+		} else {
+			log.Printf("AI 预测失败")
+		}
+	}
 
 	if nation == "" {
 		quickPred := QuickPredictNation(username, user, repos)
@@ -276,8 +307,15 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 			nation = quickPred.Nation
 			nationConfidence = quickPred.Confidence
 		}
-	} else {
-		nationConfidence = 100
+	}
+
+	// 如果所有预测方法仍然未能确定国家，调用 AI 客户端
+	if nation == "" {
+		aiNation, aiConfidence := gc.predictNationWithAI(user, repos)
+		if aiNation != "" {
+			nation = aiNation
+			nationConfidence = aiConfidence
+		}
 	}
 
 	developer.Nation = nation
@@ -308,6 +346,8 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 
 	// 保存到数据库
 	if existingDev != nil {
+		developer.ID = existingDev.ID
+		developer.CreatedAt = existingDev.CreatedAt
 		if err := developer.Update(); err != nil {
 			return nil, fmt.Errorf("更新用户失败: %v", err)
 		}
@@ -317,10 +357,29 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 		}
 	}
 
+	// 创建并发送评估任务
+	evaluationTask := &queue.EvaluationTask{
+		Username:     developer.Username,
+		ProfileURL:   developer.ProfileURL,
+		BlogURL:      user.GetBlog(),
+		Description:  user.GetBio(),
+		Repositories: developer.Repositories,
+		CreatedAt:    time.Now(),
+	}
+
+	// 发送评估任务到队列
+	queueClient := queue.NewQueue()
+	if err := queueClient.Publish(evaluationTask); err != nil {
+		log.Printf("Warning: Failed to publish evaluation task for %s: %v", username, err)
+	} else {
+		log.Printf("Successfully published evaluation task for %s", username)
+	}
+
 	// 验证保存后的数据
 	savedDev, err := models.FindByUsername(developer.Username)
 	if err == nil && savedDev != nil {
-		log.Printf("Debug - Verified Avatar URL after save: %s", savedDev.Avatar)
+		log.Printf("Debug - Verified saved data for %s, tech_evaluation: %+v",
+			savedDev.Username, savedDev.TechEvaluation)
 	}
 
 	// 如Redis客户端可用，保存到缓存
@@ -339,25 +398,25 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 }
 
 // predictNation 通过其他信息预测用户的国家
-func predictNation(user *github.User, repos []*github.Repository) string {
+func (gc *GitHubCrawler) predictNation(user *github.User, repos []*github.Repository) string {
 	// 1. 分析提交时间分布
-	commitTimes := analyzeCommitTimes(repos)
+	commitTimes := gc.analyzeCommitTimes(repos)
 	if timezone := predictTimezone(commitTimes); timezone != "" {
 		return timezoneToCountry(timezone)
 	}
 
 	// 2. 分析码注释语言
-	if lang := analyzeCodeComments(repos); lang != "" {
-		return languageToCountry(lang)
+	if lang := gc.analyzeCodeComments(repos); lang != "" {
+		return gc.languageToCountry(lang)
 	}
 
 	// 3. 分析用户名特征
-	if country := analyzeUsername(getPtrValue(user.Login)); country != "" {
+	if country := gc.analyzeUsername(getPtrValue(user.Login)); country != "" {
 		return country
 	}
 
 	// 4. 分析仓库名称和描述
-	if country := analyzeRepoInfo(repos); country != "" {
+	if country := gc.analyzeRepoInfo(repos); country != "" {
 		return country
 	}
 
@@ -365,73 +424,208 @@ func predictNation(user *github.User, repos []*github.Repository) string {
 }
 
 // analyzeCommitTimes 分析提交时间分布
-func analyzeCommitTimes(repos []*github.Repository) []time.Time {
-	// TODO: 实现提交时间分析
-	return nil
+func (gc *GitHubCrawler) analyzeCommitTimes(repos []*github.Repository) []time.Time {
+	var commitTimes []time.Time
+
+	for _, repo := range repos {
+		commits, _, err := gc.client.Repositories.ListCommits(gc.ctx, getPtrValue(repo.Owner.Login), getPtrValue(repo.Name), nil)
+		if err != nil {
+			continue
+		}
+
+		for _, commit := range commits {
+			if commit.Commit != nil && commit.Commit.Author != nil && commit.Commit.Author.Date != nil {
+				commitTimes = append(commitTimes, *commit.Commit.Author.Date)
+			}
+		}
+	}
+
+	return commitTimes
 }
 
 // predictTimezone 据时间分布预测时区
-func predictTimezone(times []time.Time) string {
-	// TODO: 实现时区预测
+func predictTimezone(commitTimes []time.Time) string {
+	if len(commitTimes) == 0 {
+		return ""
+	}
+
+	// 统计提交时间的小时分布
+	hourCount := make(map[int]int)
+	for _, t := range commitTimes {
+		hour := t.Hour()
+		hourCount[hour]++
+	}
+
+	// 找出最活跃的时间段（6小时）
+	maxCount := 0
+	peakStartHour := 0
+
+	for hour := 0; hour < 24; hour++ {
+		count := 0
+		for i := 0; i < 6; i++ {
+			h := (hour + i) % 24
+			count += hourCount[h]
+		}
+		if count > maxCount {
+			maxCount = count
+			peakStartHour = hour
+		}
+	}
+
+	// 根据活跃时间段推测时区
+	switch {
+	case peakStartHour >= 8 && peakStartHour <= 10:
+		return "Asia/Shanghai"
+	case peakStartHour >= 6 && peakStartHour <= 8:
+		return "America/New_York"
+		// 可以添加更多时区判断
+	}
+
 	return ""
 }
 
-// timezoneToCountry 将时区映射到可能的国家
+// timezoneToCountry 将时区映到可能的国家
 func timezoneToCountry(timezone string) string {
-	// 时区到国家映射
-	timezoneMap := map[string]string{
-		"Asia/Shanghai":    "CN",
-		"Asia/Tokyo":       "JP",
-		"America/New_York": "US",
-		// 添加更多映射...
+	if country, ok := timezoneCountryMap[timezone]; ok {
+		return country
 	}
-	return timezoneMap[timezone]
+	return ""
 }
 
 // analyzeCodeComments 分析代码注释中的语言
-func analyzeCodeComments(repos []*github.Repository) string {
-	// TODO: 实现代码注释语言分析
-	return ""
+func (gc *GitHubCrawler) analyzeCodeComments(repos []*github.Repository) string {
+	commentPatterns := map[string]*regexp.Regexp{
+		"chinese":  regexp.MustCompile(`[\p{Han}]`),
+		"english":  regexp.MustCompile(`^[a-zA-Z\s.,!?]+$`),
+		"japanese": regexp.MustCompile(`[\p{Hiragana}\p{Katakana}]`),
+		"korean":   regexp.MustCompile(`[\p{Hangul}]`),
+	}
+
+	langCount := make(map[string]int)
+
+	for _, repo := range repos {
+		// 获取仓库内容
+		_, contents, _, err := gc.client.Repositories.GetContents(gc.ctx, getPtrValue(repo.Owner.Login), getPtrValue(repo.Name), "", nil)
+		if err != nil {
+			continue
+		}
+
+		for _, content := range contents {
+			if content.Type != nil && *content.Type == "file" {
+				// 分析文件内容中的注释
+				fileContent, err := getFileContent(content)
+				if err != nil {
+					continue
+				}
+
+				for lang, pattern := range commentPatterns {
+					if matches := pattern.FindAllString(fileContent, -1); len(matches) > 0 {
+						langCount[lang] += len(matches)
+					}
+				}
+			}
+		}
+	}
+
+	// 返回最常见的语言
+	maxCount := 0
+	dominantLang := ""
+	for lang, count := range langCount {
+		if count > maxCount {
+			maxCount = count
+			dominantLang = lang
+		}
+	}
+
+	return dominantLang
 }
 
 // languageToCountry 将语言映射到可能的家
-func languageToCountry(lang string) string {
-	// 语言到国家映射
-	langMap := map[string]string{
-		"chinese":  "CN",
-		"japanese": "JP",
-		"korean":   "KR",
-		// 添加更多映射...
+func (gc *GitHubCrawler) languageToCountry(language string) string {
+	if country, ok := languageCountryMap[language]; ok {
+		return country
 	}
-	return langMap[lang]
+	return ""
 }
 
 // analyzeUsername 分析用户名特征
-func analyzeUsername(username string) string {
-	// 简单的用户特征分析
-	if strings.Contains(strings.ToLower(username), "cn") {
+func (gc *GitHubCrawler) analyzeUsername(username string) string {
+	// 汉字匹配
+	chinesePattern := regexp.MustCompile(`[\p{Han}]`)
+	if chinesePattern.MatchString(username) {
 		return "CN"
 	}
-	if strings.Contains(strings.ToLower(username), "jp") {
+
+	// 中文拼音特征
+	pinyinPattern := regexp.MustCompile(`^[a-z]+(zhang|wang|li|zhao|liu|chen|yang|huang|zhou|wu|sun|zhu|ma|lin|xu|luo|guo|he|gao|zheng)$`)
+	if pinyinPattern.MatchString(strings.ToLower(username)) {
+		return "CN"
+	}
+
+	// 日文假名和汉字特征
+	japanesePattern := regexp.MustCompile(`([\p{Hiragana}\p{Katakana}]|kawa|naka|taka|hiro|yama|sato|suzuki|tana|ito|watanabe|yamamoto|nakamura|kobayashi|saito)`)
+	if japanesePattern.MatchString(strings.ToLower(username)) {
 		return "JP"
 	}
-	// 添加更多规则...
+
+	// 韩文和韩名称特征
+	koreanPattern := regexp.MustCompile(`([\p{Hangul}]|kim|lee|park|choi|jung|kang|cho|yoon|jang|lim|han|oh|seo|shin)`)
+	if koreanPattern.MatchString(strings.ToLower(username)) {
+		return "KR"
+	}
+
 	return ""
 }
 
 // analyzeRepoInfo 分析仓库信息
-func analyzeRepoInfo(repos []*github.Repository) string {
+func (gc *GitHubCrawler) analyzeRepoInfo(repos []*github.Repository) string {
+	langCount := make(map[string]int)
+
 	for _, repo := range repos {
-		desc := strings.ToLower(getPtrValue(repo.Description))
-		if strings.Contains(desc, "china") || strings.Contains(desc, "中国") {
-			return "CN"
+		// 分析仓库描述
+		if repo.Description != nil {
+			desc := strings.ToLower(*repo.Description)
+
+			// 检测中文
+			if strings.Contains(desc, "中国") || strings.Contains(desc, "中文") {
+				langCount["chinese"]++
+			}
+
+			// 检测日语
+			if strings.Contains(desc, "日本") || strings.Contains(desc, "にほん") {
+				langCount["japanese"]++
+			}
+
+			// 检测韩语
+			if strings.Contains(desc, "한국") || strings.Contains(desc, "조선") {
+				langCount["korean"]++
+			}
 		}
-		if strings.Contains(desc, "japan") || strings.Contains(desc, "日本") {
-			return "JP"
+
+		// 分析仓库主要语言
+		if repo.Language != nil {
+			switch *repo.Language {
+			case "Chinese":
+				langCount["chinese"]++
+			case "Japanese":
+				langCount["japanese"]++
+			case "Korean":
+				langCount["korean"]++
+			}
 		}
-		// 添加更多规则...
 	}
-	return ""
+
+	// 返回最见的语言对应的国家
+	maxCount := 0
+	dominantLang := ""
+	for lang, count := range langCount {
+		if count > maxCount {
+			maxCount = count
+			dominantLang = lang
+		}
+	}
+
+	return languageCountryMap[dominantLang]
 }
 
 // 修改 GetUserRepositories 方法，使用并发处理
@@ -517,35 +711,25 @@ func getPtrValue[T any](ptr *T) T {
 func (gc *GitHubCrawler) extractSkills(repos []*github.Repository) []string {
 	skillMap := make(map[string]struct{})
 
-	// 遍历所有仓库
 	for _, repo := range repos {
-		// 获取仓库的语言信息
 		if repo.Language != nil && *repo.Language != "" {
-			skillMap[*repo.Language] = struct{}{}
+			skillMap[strings.ToLower(*repo.Language)] = struct{}{}
 		}
-
-		// 获取仓库的所有语言
-		ctx := context.Background()
-		languages, _, err := gc.client.Repositories.ListLanguages(ctx, getPtrValue(repo.Owner.Login), getPtrValue(repo.Name))
+		languages, _, err := gc.client.Repositories.ListLanguages(gc.ctx, getPtrValue(repo.Owner.Login), getPtrValue(repo.Name))
 		if err != nil {
 			continue
 		}
-
-		// 添加所有使用的语
 		for lang := range languages {
-			skillMap[lang] = struct{}{}
+			skillMap[strings.ToLower(lang)] = struct{}{}
 		}
 	}
 
-	// 转换为切
 	skills := make([]string, 0, len(skillMap))
 	for skill := range skillMap {
 		if skill != "" {
 			skills = append(skills, skill)
 		}
 	}
-
-	// 按字母顺序排序
 	sort.Strings(skills)
 	return skills
 }
@@ -650,7 +834,7 @@ func (gc *GitHubCrawler) extractLocationFromRepos(repos []*github.Repository) st
 	return ""
 }
 
-// isValidLocation 验证文本是否看起来像位置信息
+// isValidLocation 验证文本是看起来像位置信息
 func isValidLocation(text string) bool {
 	// 如果文本太长，可能不是位置信息
 	if len(text) > 100 {
@@ -790,7 +974,7 @@ func QuickPredictNation(username string, user *github.User, repos []*github.Repo
 			factors = append(factors, "邮箱服务(foxmail)")
 		case strings.Contains(email, "qq.com"):
 			points["CN"] += 1.5
-			factors = append(factors, "邮箱服务(qq)")
+			factors = append(factors, "箱服务(qq)")
 		case strings.Contains(email, "163.com"):
 			points["CN"] += 1.5
 			factors = append(factors, "邮箱服务(163)")
@@ -817,11 +1001,11 @@ func QuickPredictNation(username string, user *github.User, repos []*github.Repo
 	} {
 		if strings.Contains(usernameLower, keyword) || strings.Contains(nameLower, keyword) {
 			points[country] += 1.5
-			factors = append(factors, "用户名/显示名称关键词")
+			factors = append(factors, "用户名/显示名称关词")
 		}
 	}
 
-	// 3. 查仓库描述和README
+	// 3. 查仓库描述README
 	chineseCount := 0
 	for _, repo := range repos {
 		desc := strings.ToLower(getPtrValue(repo.Description))
@@ -841,7 +1025,7 @@ func QuickPredictNation(username string, user *github.User, repos []*github.Repo
 	// 如果超过30%的仓库描述包含中文
 	if float64(chineseCount)/float64(len(repos)) > 0.3 {
 		points["CN"] += 2.0
-		factors = append(factors, "大量中文仓库描述")
+		factors = append(factors, "大量中文仓���描述")
 	}
 
 	// 4. 检查公司信息
@@ -886,7 +1070,7 @@ func containsChinese(s string) bool {
 	return false
 }
 
-// containsJapanese 检测字符串是否包含日字符
+// containsJapanese 检测字符串是否包含日字
 func containsJapanese(s string) bool {
 	for _, r := range s {
 		if unicode.In(r, unicode.Hiragana, unicode.Katakana) {
@@ -1068,7 +1252,6 @@ func (gc *GitHubCrawler) getRepoTotalCommits(owner, repoName string) int {
 
 // 实现获取用户在仓库中的提交数
 func (gc *GitHubCrawler) getUserCommitsInRepo(username, owner, repoName string) int {
-	// 分页获取用户的提交记录
 	opts := &github.CommitsListOptions{
 		Author: username,
 		ListOptions: github.ListOptions{
@@ -1093,7 +1276,7 @@ func (gc *GitHubCrawler) getUserCommitsInRepo(username, owner, repoName string) 
 	return totalCommits
 }
 
-// 新增：计算置信度的函数
+// 新增：计置信度的函数
 func calculateConfidence(contributions, stars, followers int, hasLocation bool) float64 {
 	// 基础置信度
 	baseConfidence := 0.5
@@ -1101,7 +1284,7 @@ func calculateConfidence(contributions, stars, followers int, hasLocation bool) 
 	// 根据贡献调整置信度
 	contributionConfidence := math.Min(float64(contributions)/1000.0, 0.3)
 
-	// 根据 star 数调整置信度
+	// 据 star 数调整置信度
 	starConfidence := math.Min(float64(stars)/10000.0, 0.1)
 
 	// 根据关注者数调整置信度
@@ -1122,4 +1305,209 @@ func calculateConfidence(contributions, stars, followers int, hasLocation bool) 
 
 	// 确保置信度在 0-100 之间
 	return math.Min(totalConfidence*100, 100)
+}
+
+// 辅助函数：获取文件内容
+func getFileContent(content *github.RepositoryContent) (string, error) {
+	if content.Content != nil {
+		decoded, err := base64.StdEncoding.DecodeString(*content.Content)
+		if err != nil {
+			return "", err
+		}
+		return string(decoded), nil
+	}
+	return "", fmt.Errorf("no content available")
+}
+
+// timezoneCountryMap 时区到国家代码的映射
+var timezoneCountryMap = map[string]string{
+	// 亚洲
+	"Asia/Shanghai":    "CN",
+	"Asia/Hong_Kong":   "CN",
+	"Asia/Chongqing":   "CN",
+	"Asia/Harbin":      "CN",
+	"Asia/Urumqi":      "CN",
+	"Asia/Tokyo":       "JP",
+	"Asia/Seoul":       "KR",
+	"Asia/Singapore":   "SG",
+	"Asia/Taipei":      "TW",
+	"Asia/Bangkok":     "TH",
+	"Asia/Jakarta":     "ID",
+	"Asia/Manila":      "PH",
+	"Asia/Kolkata":     "IN",
+	"Asia/Ho_Chi_Minh": "VN",
+
+	// 北美
+	"America/New_York":    "US",
+	"America/Los_Angeles": "US",
+	"America/Chicago":     "US",
+	"America/Denver":      "US",
+	"America/Phoenix":     "US",
+	"America/Toronto":     "CA",
+	"America/Vancouver":   "CA",
+	"America/Montreal":    "CA",
+
+	// 欧洲
+	"Europe/London":    "GB",
+	"Europe/Paris":     "FR",
+	"Europe/Berlin":    "DE",
+	"Europe/Madrid":    "ES",
+	"Europe/Rome":      "IT",
+	"Europe/Amsterdam": "NL",
+	"Europe/Stockholm": "SE",
+	"Europe/Oslo":      "NO",
+	"Europe/Moscow":    "RU",
+}
+
+// languageCountryMap 语言到国家代码的映射
+var languageCountryMap = map[string]string{
+	// 亚洲语言
+	"chinese":    "CN",
+	"mandarin":   "CN",
+	"cantonese":  "CN",
+	"japanese":   "JP",
+	"korean":     "KR",
+	"vietnamese": "VN",
+	"thai":       "TH",
+	"indonesian": "ID",
+	"malay":      "MY",
+	"hindi":      "IN",
+
+	// 欧洲语言
+	"german":     "DE",
+	"french":     "FR",
+	"italian":    "IT",
+	"spanish":    "ES",
+	"portuguese": "PT",
+	"russian":    "RU",
+	"dutch":      "NL",
+	"swedish":    "SE",
+	"norwegian":  "NO",
+	"danish":     "DK",
+
+	// 英语变体
+	"english":    "US", // 默认美式英语
+	"british":    "GB",
+	"australian": "AU",
+	"canadian":   "CA",
+}
+
+// predictNationWithAI 使用 AI 客户端预测国家
+func (gc *GitHubCrawler) predictNationWithAI(user *github.User, repos []*github.Repository) (string, float64) {
+	info := map[string]interface{}{
+		"username":    getPtrValue(user.Login),
+		"name":        getPtrValue(user.Name),
+		"email":       getPtrValue(user.Email),
+		"location":    getPtrValue(user.Location),
+		"profile_url": user.GetHTMLURL(),
+		"skills":      gc.extractSkills(repos),
+		"languages":   gc.extractLanguages(repos),
+		"repos":       repoNames(repos),
+		"commits":     gc.getTotalCommits(repos),
+		"stars":       getTotalStars(repos),
+		"forks":       getTotalForks(repos),
+		"last_active": getLastActiveTime(repos).Format("2006-01-02"),
+	}
+
+	evaluation, err := gc.aiClient.EvaluateDeveloper(gc.ctx, info)
+	if err != nil {
+		log.Printf("AI 评估失败: %v", err)
+		return "", 0
+	}
+
+	if evaluation.Nation == "" {
+		log.Printf("AI 未能预测国家")
+		return "", 0
+	}
+
+	log.Printf("AI 预测结果 - 国家: %s, 置信度: %.2f", evaluation.Nation, evaluation.Confidence)
+	return evaluation.Nation, evaluation.Confidence
+}
+
+// extractLanguages 提取所有使用的编程语言
+func (gc *GitHubCrawler) extractLanguages(repos []*github.Repository) []string {
+	languageSet := make(map[string]struct{})
+
+	for _, repo := range repos {
+		if repo.Language != nil && *repo.Language != "" {
+			languageSet[strings.ToLower(*repo.Language)] = struct{}{}
+		}
+		languages, _, err := gc.client.Repositories.ListLanguages(gc.ctx, getPtrValue(repo.Owner.Login), getPtrValue(repo.Name))
+		if err != nil {
+			continue
+		}
+		for lang := range languages {
+			languageSet[strings.ToLower(lang)] = struct{}{}
+		}
+	}
+
+	languages := make([]string, 0, len(languageSet))
+	for lang := range languageSet {
+		languages = append(languages, lang)
+	}
+
+	sort.Strings(languages)
+	return languages
+}
+
+// 提取仓库 URLs
+func repoURLs(repos []*github.Repository) []string {
+	urls := make([]string, 0, len(repos))
+	for _, repo := range repos {
+		urls = append(urls, repo.GetHTMLURL())
+	}
+	return urls
+}
+
+// getTotalCommits 计算所有仓库的提交总数
+func (gc *GitHubCrawler) getTotalCommits(repos []*github.Repository) int {
+	total := 0
+	for _, repo := range repos {
+		total += gc.getUserCommitsInRepo(
+			getPtrValue(repo.Owner.Login),
+			getPtrValue(repo.Owner.Login),
+			getPtrValue(repo.Name),
+		)
+	}
+	return total
+}
+
+// getTotalForks 计算所有仓库的 Fork 总数
+func getTotalForks(repos []*github.Repository) int {
+	total := 0
+	for _, repo := range repos {
+		total += repo.GetForksCount()
+	}
+	return total
+}
+
+// getRepoStars 计算所有仓库的 Stars 总数
+func getRepoStars(repos []*github.Repository) int {
+	total := 0
+	for _, repo := range repos {
+		total += repo.GetStargazersCount()
+	}
+	return total
+}
+
+// getLastActiveTime 获取用户最近的活跃时间
+func getLastActiveTime(repos []*github.Repository) time.Time {
+	var lastActive time.Time
+	for _, repo := range repos {
+		updatedAt := repo.GetUpdatedAt().Time
+		if updatedAt.After(lastActive) {
+			lastActive = updatedAt
+		}
+	}
+	return lastActive
+}
+
+// getCreationTime 获取用户账户的创建时间
+func getCreationTime(user *github.User) time.Time {
+	return user.GetCreatedAt().Time
+}
+
+// getUpdateTime 获取用户账户的最后更新时间
+func getUpdateTime(user *github.User) time.Time {
+	return user.GetUpdatedAt().Time
 }
