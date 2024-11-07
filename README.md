@@ -1,6 +1,8 @@
-
+![mmexport1730992177316](https://github.com/user-attachments/assets/c4432388-6d20-48b6-8d6d-b205d34c63a8)
 # 整体架构图
-![Uploading mmexport1730992177316.png…]()
+
+https://github.com/user-attachments/assets/312ae5f1-db95-42d6-bfd6-6984dec17594
+
 
 
 
