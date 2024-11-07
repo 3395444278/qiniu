@@ -74,34 +74,6 @@ func NewGitHubCrawler() *GitHubCrawler {
 	}
 }
 
-// CleanUsername 清理和验证 GitHub 用户名
-func CleanUsername(rawUsername string) (string, error) {
-	// 移除特殊字符和额外的描述
-	username := strings.Split(rawUsername, " ")[0] // 取第一部分
-	username = strings.Split(username, "·")[0]     // 移除 · 后面的内容
-	username = strings.TrimSpace(username)         // 移除空格
-
-	// GitHub 用户名规则验证
-	// 只允许字母、数字和单个连字符（不能以连字符开始或结束）
-	validUsername := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]$`)
-
-	if !validUsername.MatchString(username) {
-		return "", fmt.Errorf("invalid GitHub username format: %s", username)
-	}
-
-	// 检查连续的连字符
-	if strings.Contains(username, "--") {
-		return "", fmt.Errorf("invalid GitHub username format (contains consecutive hyphens): %s", username)
-	}
-
-	// 检查长度
-	if len(username) > 39 {
-		return "", fmt.Errorf("username too long (max 39 characters): %s", username)
-	}
-
-	return username, nil
-}
-
 // GetUserData 获取用基本信息
 func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error) {
 	// 1. 首先检查数据库中是否已存在该用户
@@ -766,12 +738,6 @@ func getTotalStars(repos []*github.Repository) int {
 	return total
 }
 
-// 新增：从URL中提取位置信息
-func extractLocationFromURL(url string) string {
-	// TODO: 实现从个人网站提取位置信息的逻辑
-	return ""
-}
-
 // 新增：从仓库中提取位置信息
 func (gc *GitHubCrawler) extractLocationFromRepos(repos []*github.Repository) string {
 	for _, repo := range repos {
@@ -886,45 +852,6 @@ func isValidLocation(text string) bool {
 	}
 
 	return false
-}
-
-// extractLocationFromBio 从Bio中提取位置信息
-func extractLocationFromBio(bio string) string {
-	// 位置相关的关键词
-	locationKeywords := []string{
-		"Location:", "Based in", "Living in", "From", "所在地:", "位置:", "常驻:", "来自:",
-		"工作地点:", "工作城市:", "所在城市:", "所在省份:", "所在国家:",
-	}
-
-	// 将bio按行分割
-	lines := strings.Split(bio, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		for _, keyword := range locationKeywords {
-			if strings.Contains(strings.ToLower(line), strings.ToLower(keyword)) {
-				// 提取关键词后的文本
-				text := line[strings.Index(line, keyword)+len(keyword):]
-				// 清理文本
-				text = strings.TrimSpace(text)
-				text = strings.Trim(text, ":")
-				text = strings.TrimSpace(text)
-				if text != "" && isValidLocation(text) {
-					return text
-				}
-			}
-		}
-	}
-
-	// 如果没有找到关键词，尝试直接匹配城市或国家名
-	words := strings.Fields(bio)
-	for _, word := range words {
-		// 检查是否是城市名或国家名
-		if isValidLocation(word) && extractNation(word) != "" {
-			return word
-		}
-	}
-
-	return ""
 }
 
 // getRepoReadme 获取仓库的README内容
@@ -1070,16 +997,6 @@ func containsChinese(s string) bool {
 	return false
 }
 
-// containsJapanese 检测字符串是否包含日字
-func containsJapanese(s string) bool {
-	for _, r := range s {
-		if unicode.In(r, unicode.Hiragana, unicode.Katakana) {
-			return true
-		}
-	}
-	return false
-}
-
 // calculateQuickConfidence 计算快速预测的置信度
 func calculateQuickConfidence(maxScore float64, factorCount int) float64 {
 	// 基础置信度
@@ -1093,35 +1010,6 @@ func calculateQuickConfidence(maxScore float64, factorCount int) float64 {
 
 	totalConfidence := baseConfidence + scoreConfidence + factorConfidence
 	return math.Min(totalConfidence, 1.0) * 100
-}
-
-// analyzeBasicInfo 基于基本信息的快速分析
-func analyzeBasicInfo(username string, repos []*github.Repository) string {
-	// 1. 检查用户名
-	usernameLower := strings.ToLower(username)
-	switch {
-	case strings.Contains(usernameLower, "cn") || strings.Contains(usernameLower, "china"):
-		return "CN"
-	case strings.Contains(usernameLower, "jp") || strings.Contains(usernameLower, "japan"):
-		return "JP"
-	case strings.Contains(usernameLower, "kr") || strings.Contains(usernameLower, "korea"):
-		return "KR"
-	}
-
-	// 2. 快速检查仓库和描述
-	for _, repo := range repos {
-		desc := strings.ToLower(getPtrValue(repo.Description))
-		switch {
-		case strings.Contains(desc, "中") || strings.Contains(desc, "china"):
-			return "CN"
-		case strings.Contains(desc, "日本") || strings.Contains(desc, "japan"):
-			return "JP"
-		case strings.Contains(desc, "한국") || strings.Contains(desc, "korea"):
-			return "KR"
-		}
-	}
-
-	return ""
 }
 
 // 计算项目重要性，基于仓库的 star 数、fork 数等
@@ -1450,15 +1338,6 @@ func (gc *GitHubCrawler) extractLanguages(repos []*github.Repository) []string {
 	return languages
 }
 
-// 提取仓库 URLs
-func repoURLs(repos []*github.Repository) []string {
-	urls := make([]string, 0, len(repos))
-	for _, repo := range repos {
-		urls = append(urls, repo.GetHTMLURL())
-	}
-	return urls
-}
-
 // getTotalCommits 计算所有仓库的提交总数
 func (gc *GitHubCrawler) getTotalCommits(repos []*github.Repository) int {
 	total := 0
@@ -1481,15 +1360,6 @@ func getTotalForks(repos []*github.Repository) int {
 	return total
 }
 
-// getRepoStars 计算所有仓库的 Stars 总数
-func getRepoStars(repos []*github.Repository) int {
-	total := 0
-	for _, repo := range repos {
-		total += repo.GetStargazersCount()
-	}
-	return total
-}
-
 // getLastActiveTime 获取用户最近的活跃时间
 func getLastActiveTime(repos []*github.Repository) time.Time {
 	var lastActive time.Time
@@ -1500,14 +1370,4 @@ func getLastActiveTime(repos []*github.Repository) time.Time {
 		}
 	}
 	return lastActive
-}
-
-// getCreationTime 获取用户账户的创建时间
-func getCreationTime(user *github.User) time.Time {
-	return user.GetCreatedAt().Time
-}
-
-// getUpdateTime 获取用户账户的最后更新时间
-func getUpdateTime(user *github.User) time.Time {
-	return user.GetUpdatedAt().Time
 }
