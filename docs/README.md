@@ -1,5 +1,4 @@
 
-本系统旨在基于 GitHub 开源项目数据，开发一款开发者评估应用。系统通过对项目的重要程度、开发者在项目中的贡献度等多个维度进行分析和评估，提供开发者技术能力的评级排名。
 
 
 # 整体架构图
@@ -15,7 +14,11 @@
 
 # 演示视频地址
 下载：http://dianpiao-test.oss-cn-shenzhen.aliyuncs.com/temp/2023-04-19/mmexport1730988912590(1).mp4
+
+
 b站：https://www.bilibili.com/video/BV1NhDDYpEM5?buvid=XXBA79DB2D09A6B89A452BC313873CA633BC5&from_spmid=dt.dt.video.0&is_story_h5=false&mid=blCUROVXIpcn%2Bqa3P2EXdw%3D%3D&plat_id=114&share_from=ugc&share_medium=android&share_plat=android&share_session_id=cba51599-403c-4ccb-8b83-ac0abef6d87a&share_source=WEIXIN&share_tag=s_i&spmid=united.player-video-detail.0.0&timestamp=1730996014&unique_k=LDgSpm9&up_id=173913923&vd_source=7d86eceb26807ff0475aec9e336148c3
+
+
 # GitHub 开发者评估系统
 
 基于 GitHub 的开源项目数据，开发的开发者评估应用。通过分析开发者的项目贡献、技术栈和影响力，提供全面的开发者画像。
