@@ -1,4 +1,16 @@
 
+
+# 整体架构图
+
+
+![mmexport1730992177316](https://github.com/user-attachments/assets/c4432388-6d20-48b6-8d6d-b205d34c63a8)
+
+
+
+
+
+
+
 # 演示视频地址
 http://dianpiao-test.oss-cn-shenzhen.aliyuncs.com/temp/2023-04-19/mmexport1730988912590(1).mp4
 
@@ -41,11 +53,15 @@ http://dianpiao-test.oss-cn-shenzhen.aliyuncs.com/temp/2023-04-19/mmexport173098
    - 项目描述分析
    - 技术栈自动归类
 
+## 快速启动
+启动 cmd下面三个包的main.go
+（注意填入相应redis mongodb deepseek Api   github api的配置)
+
 ## 命令行工具
 
 ### 1. 环境配置
 
-设置环境变量：
+设置环境变量（可以直接在配置文件配置）：
 
 ```bash
 # 设置 GitHub API Token（必需）
