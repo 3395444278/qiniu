@@ -1,3 +1,7 @@
+
+# 演示视频地址
+http://dianpiao-test.oss-cn-shenzhen.aliyuncs.com/temp/2023-04-19/mmexport1730988912590(1).mp4
+
 # GitHub 开发者评估系统
 
 基于 GitHub 的开源项目数据，开发的开发者评估应用。通过分析开发者的项目贡献、技术栈和影响力，提供全面的开发者画像。
@@ -463,3 +467,178 @@ GET /api/search?keyword=john&skills=Go,Python&min_stars=1000&sort_by=star_count
 
 ```bash
 redis
+
+
+### 后端整体架构说明
+3. # 后端项目架构设计文档
+
+   ## 1. 整体架构
+
+   ### 1.1 系统架构图
+
+   graph TD
+       A --> C[开发者服务]
+       A --> D[搜索服务]
+       A --> E[AI评估服务]
+       
+
+       B --> F[(Redis)]
+       C --> G[(MongoDB)]
+       H[GitHub API] --> I[爬虫服务]
+       I --> G
+
+###     1.2 核心模块
+
+####      internal/crawler
+
+```go
+type GithubCrawler struct {
+    client    *github.Client
+    rateLimit *redis.Client
+    storage   *mongo.Collection
+}
+
+func (c *GithubCrawler) FetchUserData(username string) (*models.Developer, error) {
+    // 实现 GitHub 数据抓取
+    // 包含速率限制处理
+    // 错误重试机制
+}
+```
+
+
+
+ internal/models
+
+```go
+type Developer struct {
+    ID              primitive.ObjectID `bson:"_id,omitempty"`
+    Username        string            `bson:"username"`
+    Name            string            `bson:"name"`
+    Location        string            `bson:"location"`
+    Nation          string            `bson:"nation"`
+    NationConfidence float64          `bson:"nation_confidence"`
+    Skills          []string          `bson:"skills"`
+    TalentRank      float64          `bson:"talent_rank"`
+    Metrics         DeveloperMetrics  `bson:"metrics"`
+    UpdatedAt       time.Time         `bson:"updated_at"`
+}
+```
+
+#### internal/api
+
+```go
+func SetupRoutes(r *gin.Engine) {
+    // 健康检查
+    r.GET("/health", handlers.HealthCheck)
+```
+
+​    
+
+```go
+// API 路由组
+api := r.Group("/api")
+{
+    // 开发者相关接口
+    developers := api.Group("/developers")
+    {
+        developers.GET("", handlers.ListDevelopers)
+        developers.POST("", middleware.Auth(), handlers.CreateDeveloper)
+        developers.GET("/:id", handlers.GetDeveloper)
+        developers.PUT("/:id", middleware.Auth(), handlers.UpdateDeveloper)
+        developers.DELETE("/:id", middleware.Auth(), handlers.DeleteDeveloper)
+    }
+    
+    // 搜索接口
+    api.GET("/search", handlers.SearchDevelopers)
+}
+```
+
+## 2. 数据库设计
+
+### 2.1 MongoDB 集合设计
+
+#### developers 集合
+
+```go
+// 创建索引
+db.developers.createIndex({ "username": 1 }, { unique: true })
+db.developers.createIndex({ "nation": 1 })
+db.developers.createIndex({ "skills": 1 })
+db.developers.createIndex({ "talent_rank": -1 })
+db.developers.createIndex({ 
+    "username": "text", 
+    "name": "text", 
+    "location": "text" 
+})
+```
+
+### 2.2 Redis 缓存设计
+
+```
+const (
+    // 缓存键模式
+    DeveloperCacheKey = "dev:%s"      // 开发者信息缓存
+    SearchCacheKey   = "search:%s"    // 搜索结果缓存
+    RateLimitKey    = "ratelimit:%s"  // API 限流
+    
+    // 缓存过期时间
+    DeveloperCacheTTL = 24 * time.Hour
+    SearchCacheTTL   = 1 * time.Hour
+)
+```
+
+## 3. 项目检查清单
+
+### 3.1 代码规范 ✅
+
+遵循 Go 标准项目布局
+
+使用 golangci-lint 进行代码检查
+
+统一的错误处理机制
+
+完善的日志记录
+
+### 4.3 长期改进
+
+服务拆分
+
+引入消息队列
+
+实现分布式追踪
+
+完善测试覆盖率
+
+## 5. 总结
+
+### 存在的问题
+
+安全性措施不足
+
+缓存策略不完善
+
+监控体系缺失
+
+性能优化空间大
+
+### 优先级排序
+
+紧急：安全性问题修复
+
+重要：缓存机制实现
+
+常规：监控系统搭建
+
+长期：架构优化升级
+
+## 4.人员分工
+
+**前端**
+
+张三：负责vue
+
+**后端**
+
+徐瑞
+
+
