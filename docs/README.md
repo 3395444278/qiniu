@@ -286,23 +286,7 @@ GET /api/search?keyword=john&skills=Go,Python&min_stars=1000&sort_by=star_count
 redis
 
 
-### 后端整体架构说明
-3. # 后端项目架构设计文档
-
-   ## 1. 整体架构
-
-   ### 1.1 系统架构图
-
-   graph TD
-       A --> C[开发者服务]
-       A --> D[搜索服务]
-       A --> E[AI评估服务]
-       
-
-       B --> F[(Redis)]
-       C --> G[(MongoDB)]
-       H[GitHub API] --> I[爬虫服务]
-       I --> G
+### 后端模块说明
 
 ###     1.2 核心模块
 
