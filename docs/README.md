@@ -1,4 +1,6 @@
 
+本系统旨在基于 GitHub 开源项目数据，开发一款开发者评估应用。系统通过对项目的重要程度、开发者在项目中的贡献度等多个维度进行分析和评估，提供开发者技术能力的评级排名。
+
 
 # 整体架构图
 
@@ -12,8 +14,8 @@
 
 
 # 演示视频地址
-http://dianpiao-test.oss-cn-shenzhen.aliyuncs.com/temp/2023-04-19/mmexport1730988912590(1).mp4
-
+下载：http://dianpiao-test.oss-cn-shenzhen.aliyuncs.com/temp/2023-04-19/mmexport1730988912590(1).mp4
+b站：https://www.bilibili.com/video/BV1NhDDYpEM5?buvid=XXBA79DB2D09A6B89A452BC313873CA633BC5&from_spmid=dt.dt.video.0&is_story_h5=false&mid=blCUROVXIpcn%2Bqa3P2EXdw%3D%3D&plat_id=114&share_from=ugc&share_medium=android&share_plat=android&share_session_id=cba51599-403c-4ccb-8b83-ac0abef6d87a&share_source=WEIXIN&share_tag=s_i&spmid=united.player-video-detail.0.0&timestamp=1730996014&unique_k=LDgSpm9&up_id=173913923&vd_source=7d86eceb26807ff0475aec9e336148c3
 # GitHub 开发者评估系统
 
 基于 GitHub 的开源项目数据，开发的开发者评估应用。通过分析开发者的项目贡献、技术栈和影响力，提供全面的开发者画像。
@@ -105,210 +107,6 @@ go run cmd/crawler/main.go -h
 |---------------------|-------|--------|--------------------------------|
 | `-users`            | string|        | 指定单个或多个用户名（逗号分隔） |
 | `-concurrency`      | int   | 5      | 并发数量（默认 5）               |
-
-## API 接口文档
-
-### 1. 健康检查
-
-```http
-GET /health
-```
-
-用于检查服务器是否正常运行。
-
-#### 响应示例
-
-```json
-{
-  "code": 0,
-  "message": "success",
-  "data": "OK"
-}
-```
-
-### 3. 获取单个开发者信息
-
-```http
-GET /api/developers/{id}
-```
-
-获取指定 ID 的开发者信息。
-
-#### 路径参数
-
-| 参数   | 类型 | 必需 | 描述           |
-|--------|------|------|----------------|
-| `id`   | string | 是   | 开发者的唯一 ID |
-
-#### 响应示例
-
-```json
-{
-  "code": 0,
-  "message": "success",
-  "data": {
-    "username": "torvalds",
-    "name": "Linus Torvalds",
-    "avatar": "https://avatars.githubusercontent.com/u/1024025",
-    "location": "Portland, OR",
-    "nation": "US",
-    "nation_confidence": 95.5,
-    "skills": ["C", "Shell", "Perl"],
-    "metrics": {
-      "star_count": 145200,
-      "fork_count": 42300,
-      "commit_count": 8750
-    },
-    "repositories": ["linux", "subsurface", "uemacs"],
-    "talent_rank": 98.7,
-    "confidence": 99.9,
-    "updated_at": "2024-01-20T10:30:00Z"
-  }
-}
-```
-
-### 5. 创建开发者
-
-```http
-POST /api/developers
-```
-
-创建新的开发者信息（需要认证）。
-
-#### 请求体
-
-```json
-{
-  "username": "example",
-  "name": "Example User",
-  "avatar": "https://avatars.githubusercontent.com/u/...",
-  "location": "Beijing, China",
-  "nation": "CN",
-  "skills": ["Go", "Python", "JavaScript"],
-  "metrics": {
-    "star_count": 1200,
-    "fork_count": 300,
-    "commit_count": 5000
-  },
-  "repositories": ["repo1", "repo2"],
-  "talent_rank": 85.6,
-  "confidence": 92.3
-}
-```
-
-#### 响应示例
-
-```json
-{
-  "code": 0,
-  "message": "success",
-  "data": {
-    "id": "12345",
-    "username": "example",
-    "name": "Example User",
-    "avatar": "https://avatars.githubusercontent.com/u/...",
-    "location": "Beijing, China",
-    "nation": "CN",
-    "nation_confidence": 95.5,
-    "skills": ["Go", "Python", "JavaScript"],
-    "metrics": {
-      "star_count": 1200,
-      "fork_count": 300,
-      "commit_count": 5000
-    },
-    "repositories": ["repo1", "repo2"],
-    "talent_rank": 85.6,
-    "confidence": 92.3,
-    "updated_at": "2024-01-20T10:30:00Z"
-  }
-}
-```
-
-### 6. 更新开发者信息
-
-```http
-PUT /api/developers/{id}
-```
-
-更新指定 ID 的开发者信息（需要认证）。
-
-#### 路径参数
-
-| 参数 | 类型   | 必需 | 描述           |
-|------|--------|------|----------------|
-| `id` | string | 是   | 开发者的唯一 ID |
-
-#### 请求体
-
-```json
-{
-  "name": "New Name",
-  "avatar": "https://avatars.githubusercontent.com/u/...",
-  "location": "Shanghai, China",
-  "nation": "CN",
-  "skills": ["Go", "Rust"],
-  "metrics": {
-    "star_count": 1300,
-    "fork_count": 350,
-    "commit_count": 5500
-  },
-  "repositories": ["repo1", "repo3"],
-  "talent_rank": 88.2,
-  "confidence": 93.5
-}
-```
-
-#### 响应示例
-
-```json
-{
-  "code": 0,
-  "message": "success",
-  "data": {
-    "id": "12345",
-    "username": "example",
-    "name": "New Name",
-    "avatar": "https://avatars.githubusercontent.com/u/...",
-    "location": "Shanghai, China",
-    "nation": "CN",
-    "nation_confidence": 95.5,
-    "skills": ["Go", "Rust"],
-    "metrics": {
-      "star_count": 1300,
-      "fork_count": 350,
-      "commit_count": 5500
-    },
-    "repositories": ["repo1", "repo3"],
-    "talent_rank": 88.2,
-    "confidence": 93.5,
-    "updated_at": "2024-01-21T12:45:00Z"
-  }
-}
-```
-
-### 7. 删除开发者
-
-```http
-DELETE /api/developers/{id}
-```
-
-删除指定 ID 的开发者信息（需要认证）。
-
-#### 路径参数
-
-| 参数 | 类型   | 必需 | 描述           |
-|------|--------|------|----------------|
-| `id` | string | 是   | 开发者的唯一 ID |
-
-#### 响应示例
-
-```json
-{
-  "code": 0,
-  "message": "success",
-  "data": null
-}
-```
 
 
 
@@ -647,14 +445,44 @@ const (
 
 长期：架构优化升级
 
-## 4.人员分工
+4.人员分工
 
 **前端**
-
 李仕骥
+
+#### 职责：
+
+负责与项目团队沟通，理解业务需求，确定系统设计的方向和要求。
+
+负责开发用户界面，确保用户可以直观地查看开发者评估结果。
+
+##### 任务：
+
+1.设计和实现前端页面，包括但不限于首页、搜索页、结果展示页等。
+
+2.实现前端的交互逻辑，如模糊搜索、领域分类、地区分类等。
+
+3.确保前端界面的响应式设计，适配不同设备和屏幕尺寸。
+
+4.与后端服务进行接口对接，确保数据的准确传输和展示。
+
+5.参与设计数据库模型和API接口，确保数据的持久化和一致性。
+
+6.参与系统架构设计，确定系统的模块划分和通信方式。
 
 **后端**
 
- 徐瑞
+徐瑞
+
+#### 职责：
+
+负责后端业务逻辑的实现，包括API的开发和内部服务的逻辑处理
+
+负责设计数据库表结构，确保数据的组织方式能够高效支持业务需求。
+
+##### 任务：
+
+1. 设计表结构，包括字段定义、数据类型、索引等。
+2. 确保表结构的规范化，减少数据冗余，提高数据一致性。
 
 
