@@ -6,6 +6,7 @@ import (
 	"qinniu/internal/models"
 	"qinniu/internal/pkg/ai"
 	"qinniu/internal/pkg/queue"
+	"sync"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -14,12 +15,15 @@ import (
 type Evaluator struct {
 	aiClient *ai.Client
 	queue    queue.Queue
+	quit     chan struct{}
+	wg       sync.WaitGroup
 }
 
 func NewEvaluator(aiClient *ai.Client, queue queue.Queue) *Evaluator {
 	return &Evaluator{
 		aiClient: aiClient,
 		queue:    queue,
+		quit:     make(chan struct{}),
 	}
 }
 
@@ -28,7 +32,13 @@ func (e *Evaluator) Start() error {
 	e.queue.Subscribe(e.ProcessEvaluationTask)
 	return nil
 }
-
+func (e *Evaluator) Stop() error {
+	log.Println("Stopping evaluator worker...")
+	close(e.quit)
+	e.wg.Wait()
+	log.Println("Evaluator worker stopped.")
+	return nil
+}
 func (e *Evaluator) ProcessEvaluationTask(task *queue.EvaluationTask) error {
 	log.Printf("Processing evaluation task for user: %s", task.Username)
 

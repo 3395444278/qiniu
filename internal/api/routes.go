@@ -23,6 +23,7 @@ func SetupRoutes(r *gin.Engine) {
 			authorized.POST("/developers", handlers.CreateDeveloper)
 			authorized.PUT("/developers/:id", handlers.UpdateDeveloper)
 			authorized.DELETE("/developers/:id", handlers.DeleteDeveloper)
+			authorized.POST("/run-crawler", handlers.RunCrawlerHandler)
 		}
 
 		api.GET("/nations", handlers.GetAllNations)

@@ -8,35 +8,17 @@ import (
 	"qinniu/internal/crawler"
 	"qinniu/internal/models"
 	"qinniu/internal/pkg/ai"
-	"qinniu/internal/pkg/cache"
-	"qinniu/internal/pkg/database"
+
+	"qinniu/internal/pkg/initconfig"
 	"qinniu/internal/pkg/queue"
 	"qinniu/internal/worker"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/joho/godotenv"
 )
 
 func main() {
-	// 加载环境变量
-	if err := godotenv.Load("configs/.env"); err != nil {
-		log.Printf("Warning: .env file not found: %v", err)
-	}
-
-	// 初始化数据库连接
-	if err := database.InitMongoDB(); err != nil {
-		log.Fatalf("无法连接到数据库: %v", err)
-	}
-
-	// 初始化Redis连接
-	if err := cache.InitRedis(); err != nil {
-		log.Printf("Warning: Redis connection failed: %v", err)
-		log.Println("Continuing without Redis cache...")
-	} else {
-		log.Println("Successfully connected to Redis")
-	}
+	initconfig.Init()
 
 	// 启动评估服务
 	go func() {
@@ -143,7 +125,6 @@ func processUserWithRetry(crawler *crawler.GitHubCrawler, username string) (*mod
 
 	return nil, fmt.Errorf("failed after %d attempts: %v", maxRetries, err)
 }
-
 func printResult(developer *models.Developer) {
 	if developer == nil {
 		return
