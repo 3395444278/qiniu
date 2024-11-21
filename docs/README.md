@@ -169,7 +169,7 @@ go run cmd/crawler/main.go -h
 - **后端**: Go 1.20+
 - **Web框架**: Gin
 - **数据库**: MongoDB
-- **前端**: React + TypeScript
+- **前端**: Vue3 + JavaScript
 - **缓存**: Redis
 - **消息队列**: RabbitMQ (用于异步任务处理)
 
