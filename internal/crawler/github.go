@@ -141,8 +141,6 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 		name = getPtrValue(user.Login)
 	}
 
-	// 删除这里的重复获取
-	// avatarURL = user.GetAvatarURL()  // 删除这行
 	if avatarURL == "" {
 		log.Printf("Warning - No avatar URL found for user: %s", username)
 	} else {
@@ -261,17 +259,6 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 	// 处理 Nation 信息
 	var nationConfidence float64
 	nation := extractNation(developer.Location)
-	if nation == "" {
-		log.Printf("尝试使用 AI 预测国家...")
-		aiNation, aiConfidence := gc.predictNationWithAI(user, repos)
-		if aiNation != "" {
-			nation = aiNation
-			nationConfidence = aiConfidence
-			log.Printf("AI 预测成功 - 国家: %s, 置信度: %.2f", nation, nationConfidence)
-		} else {
-			log.Printf("AI 预测失败")
-		}
-	}
 
 	if nation == "" {
 		quickPred := QuickPredictNation(username, user, repos)
@@ -281,12 +268,15 @@ func (gc *GitHubCrawler) GetUserData(username string) (*models.Developer, error)
 		}
 	}
 
-	// 如果所有预测方法仍然未能确定国家，调用 AI 客户端
 	if nation == "" {
+		log.Printf("尝试使用 AI 预测国家...")
 		aiNation, aiConfidence := gc.predictNationWithAI(user, repos)
 		if aiNation != "" {
 			nation = aiNation
 			nationConfidence = aiConfidence
+			log.Printf("AI 预测成功 - 国家: %s, 置信度: %.2f", nation, nationConfidence)
+		} else {
+			log.Printf("AI 预测失败")
 		}
 	}
 

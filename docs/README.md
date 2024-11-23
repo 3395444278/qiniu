@@ -130,6 +130,32 @@ export REDIS_URL="redis://localhost:6379"
 
 ### 2. 爬虫命令
 
+### http爬取用户
+# GitHub 用户爬取 API 文档
+
+## 1. 运行爬虫接口
+
+### 接口描述
+启动爬虫任务，爬取指定 GitHub 用户的信息。
+
+### 请求信息
+- 请求路径：`/api/run-crawler`
+- 请求方法：POST
+- Content-Type：application/json
+
+### 请求参数
+| 参数名 | 类型 | 必填 | 说明 | 示例值 |
+|--------|------|------|------|---------|
+| usernames | string | 是 | GitHub 用户名，多个用户用逗号分隔 | "torvalds,antirez" |
+| concurrency | int | 是 | 并发爬取数量，取值范围 1-6 | 3 |
+
+### 请求示例
+json
+{
+"usernames": "torvalds,antirez",
+"concurrency": 3
+}
+
 #### 单个用户分析
 
 分析单个 GitHub 用户的信息：
